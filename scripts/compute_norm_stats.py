@@ -96,12 +96,14 @@ def main(config_name: str, max_frames: int | None = None):
         )
     else:
         data_loader, num_batches = create_torch_dataloader(
-            data_config, config.model.action_horizon, config.batch_size, config.model, config.num_workers, max_frames
+            data_config, config.model.action_horizon, 8, config.model, config.num_workers, max_frames
         )
 
-    keys = ["state", "actions"]
+    keys = ["state", "actions", "tactile"]
+    # tactile dim : 30 
     stats = {key: normalize.RunningStats() for key in keys}
 
+    
     for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Computing stats"):
         for key in keys:
             stats[key].update(np.asarray(batch[key]))

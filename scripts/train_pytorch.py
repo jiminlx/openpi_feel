@@ -364,7 +364,7 @@ def train_loop(config: _config.TrainConfig):
         sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False)
         sample_batch = next(iter(sample_data_loader))
         # Convert observation and actions to torch tensors
-        observation, actions = sample_batch
+        observation, actions, tactile = sample_batch
         sample_batch = observation.to_dict()
         sample_batch["actions"] = actions
 
@@ -511,7 +511,7 @@ def train_loop(config: _config.TrainConfig):
         if use_ddp and hasattr(loader, "set_epoch"):
             loader.set_epoch(global_step // len(loader))
 
-        for observation, actions in loader:
+        for observation, actions, tactile in loader:
             # Check if we've reached the target number of steps
             if global_step >= config.num_train_steps:
                 break
@@ -519,7 +519,9 @@ def train_loop(config: _config.TrainConfig):
             # The unified data loader returns (observation, actions) tuple
             observation = jax.tree.map(lambda x: x.to(device), observation)  # noqa: PLW2901
             actions = actions.to(torch.float32)  # noqa: PLW2901
+            tactile = tactile.to(torch.float32)  # noqa: PLW2901
             actions = actions.to(device)  # noqa: PLW2901
+            tactile = tactile.to(device)  # noqa: PLW2901
 
             # Update LR
             for pg in optim.param_groups:

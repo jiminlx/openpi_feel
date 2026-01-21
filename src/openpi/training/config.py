@@ -33,6 +33,9 @@ ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
 
+import openpi.policies.real_droid_policy as real_droid_policy # For real_droid policy
+import numpy as np
+
 
 @dataclasses.dataclass(frozen=True)
 class AssetsConfig:
@@ -460,14 +463,97 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
         )
+# ====================================================================================================================================
+# In this section, we add training configs for the 1. GripperTactile & FrankaTorque / 2. HandForce & XArmTorque (for each embodiment)
+# Also, the methods are : 
+# "Method name_Embodiment_(tactile/force or torque)"
+# 1. Naive / 2. TactileVLAGripperTactile / 3. TactileVLAHandForce / 3. ForceVLAGripperTactile / 4. ForceVLAHandForce / 5. TAVLAFrankaTorque / 6. TAVLAXArmTorque
+# 7. DecoupledStreamFrankaTorque / 8. DecoupledStreamGripperTactile / 9. DecoupledStreamHandForce / 10. DecoupledStreamHandTorque
+# 11. DecoupledStreamGripperTactileFrankaTorque / 12. DecoupledStreamHandForceXArmTorque
+# Implementation Needed : 1, 2, 5, 6, 7, 8, 9, 10, 11, 12
 
 
+# Class for stacking tactile & force data
+
+@dataclasses.dataclass(frozen=True)
+class StackGripperTactile:
+    """{'tactile_left': (15,), 'tactile_right': (15,)} -> {'tactile': (30,)}"""
+    left_key: str = "tactile_left"
+    right_key: str = "tactile_right"
+    out_key: str = "tactile"
+
+    def __call__(self, data):
+        left = data.pop(self.left_key)
+        right = data.pop(self.right_key)
+
+        # make numpy array and flatten
+        left  = np.asarray(left, dtype=np.float32)
+        right = np.asarray(right, dtype=np.float32)
+
+        if left.size != 15 or right.size != 15:
+            raise ValueError(f"Expected 15 dims per tactile, got {left.size=} and {right.size=}.")
+
+        data[self.out_key] = np.concatenate([left, right])  # (30,)
+        return data
+
+
+
+
+###########################################################
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRealDroidDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/exterior_image": "observation.images.34022131_left", # 34022131 : exterior
+                        "observation/wrist_image": "observation.images.10623639_left", # 10623639 : wrist
+                        "observation/state": "observation.state",
+                        "actions": "actions",
+                        "prompt": "prompt", 
+                        "tactile_left": "observation.tactile.left",
+                        "tactile_right": "observation.tactile.right",
+                    }
+                ),
+                StackGripperTactile(),
+            ]
+        )
+
+        # We assume joint *velocity* actions, so we should *not* apply an additional delta transform.
+        data_transforms = _transforms.Group(
+            inputs=[real_droid_policy.DroidInputs(model_type=model_config.model_type)],
+            outputs=[real_droid_policy.DroidOutputs()],
+        )
+
+        # the delta action transform 
+        delta_action_mask = _transforms.make_bool_mask(7, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+
+
+# ====================================================================================================================================
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
     # Project name.
-    project_name: str = "openpi"
+    project_name: str = "openpi_feel"
     # Experiment name. Will be used to name the metadata and checkpoint directories.
     exp_name: str = tyro.MISSING
 
@@ -506,7 +592,7 @@ class TrainConfig:
     batch_size: int = 32
     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
     # will increase memory and CPU usage.
-    num_workers: int = 2
+    num_workers: int = 20
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000
 
@@ -967,7 +1053,53 @@ _CONFIGS = [
     ),
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
-    *polaris_config.get_polaris_configs(),
+    *polaris_config.get_polaris_configs(), 
+
+# ====================================================================================================================================
+# In this section, we add training configs for the 1. GripperTactile & FrankaTorque / 2. HandForce & XArmTorque (for each embodiment)
+# Also, the methods are : 
+# "Method name_Embodiment_(tactile/force or torque)"
+# 1. Naive / 2. TactileVLAGripperTactile / 3. TactileVLAHandForce / 3. ForceVLAGripperTactile / 4. ForceVLAHandForce 
+# 5. TAVLAFrankaTorque / 6. TAVLAXArmTorque / 7. DecoupledStreamFrankaTorque / 8. DecoupledStreamGripperTactile 
+# 9. DecoupledStreamHandForce / 10. DecoupledStreamXArmTorque
+# 11. DecoupledStreamGripperTactileFrankaTorque / 12. DecoupledStreamHandForceXArmTorque
+# Implementation Needed : 1, 2, 5, 6, 7, 8, 9, 10, 11, 12
+
+    TrainConfig(
+        name="naive_base", # 1
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32, # pi05 is trained with 32-dim actions
+            action_horizon=16, 
+        ),
+        data=LeRobotRealDroidDataConfig(
+            repo_id="easyminnn/pi05_4tasks_final",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                #action_sequence_keys=("actions",), # or "action" # : **DEBUG** needed
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=60_000,
+    ),
+
+    TrainConfig(
+        name="decoupled_stream_gripper_tactile", # 8
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32, # pi05 is trained with 32-dim actions
+            action_horizon=16, 
+            ),
+        data=LeRobotRealDroidDataConfig(
+            repo_id="easyminnn/pi05_4tasks_final",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                #action_sequence_keys=("actions",), # or "action" # : **DEBUG** needed
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=60_000,
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

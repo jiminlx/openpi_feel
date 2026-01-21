@@ -19,6 +19,7 @@ import torch
 
 from openpi.models_pytorch import pi0_pytorch
 from openpi.shared import image_tools
+from typing import Optional, Union
 import openpi.shared.array_typing as at
 
 logger = logging.getLogger("openpi")
@@ -139,6 +140,7 @@ class Observation(Generic[ArrayT]):
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
 # produced by the data transforms.
 Actions = at.Float[ArrayT, "*b ah ad"]
+Tactile = at.Float[ArrayT, "*b ns d"]
 
 
 def preprocess_observation(
@@ -247,7 +249,12 @@ class BaseModelConfig(abc.ABC):
         return model
 
     @abc.abstractmethod
-    def inputs_spec(self, *, batch_size: int = 1) -> tuple[Observation, Actions]:
+    def inputs_spec(
+        self, *, batch_size: int = 1, with_tactile: bool = False
+    ) -> Union[
+        tuple[Observation, Actions],
+        tuple[Observation, Actions, Optional[Tactile]]
+    ]:
         """Returns the input specification for the model. Values are jax.ShapeDtypeStruct."""
 
     def fake_obs(self, batch_size: int = 1) -> Observation:
