@@ -7,7 +7,7 @@ from torch import nn
 import torch.nn.functional as F  # noqa: N812
 
 import openpi.models.gemma as _gemma
-from openpi.models_pytorch.gemma_pytorch_tactile_joint import PaliGemmaWithExpertAndTactileJointModel
+from openpi.models_pytorch.gemma_pytorch_gripper_tactile import PaliGemmaWithExpertAndGripperTactileModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
 
 
@@ -81,7 +81,7 @@ def make_att_2d_masks(pad_masks, att_masks):
     return att_2d_masks & pad_2d_masks
 
 
-class PI0PytorchWithTactileJoint(nn.Module):
+class PI0PytorchWithGripperTactile(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -91,7 +91,7 @@ class PI0PytorchWithTactileJoint(nn.Module):
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         tactile_expert_config = _gemma.get_config(config.tactile_expert_variant)
 
-        self.paligemma_with_expert = PaliGemmaWithExpertAndTactileJointModel(
+        self.paligemma_with_expert = PaliGemmaWithExpertAndGripperTactileModel(
             paligemma_config,
             action_expert_config,
             tactile_expert_config,
@@ -104,7 +104,6 @@ class PI0PytorchWithTactileJoint(nn.Module):
         self.tactile_dim = config.tactile_input_dim
         self.tactile_in_proj = nn.Linear(self.tactile_dim, tactile_expert_config.width)
         self.tactile_out_proj = nn.Linear(tactile_expert_config.width, self.tactile_dim)
-
 
         self.action_in_proj = nn.Linear(32, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, 32)
@@ -327,34 +326,66 @@ class PI0PytorchWithTactileJoint(nn.Module):
         return embs, pad_masks, att_masks, adarms_cond
 
     
-    def embed_tactile(self, tactile_data):
-
-        tactile_emb = self.tactile_in_proj(tactile_data)  # (Batch, Tactile_Seq, Dim)
+    def embed_tactile_history(self, tactile_hist):
+        """
+        tactile_hist: (Batch, Hist_Len, Dim)
+        """
+        emb = self.tactile_in_proj(tactile_hist) # (B, T, Hidden)
         
-        if tactile_emb.ndim == 2:
-            tactile_emb = tactile_emb.unsqueeze(1)
-            
+        bsize = emb.shape[0]
+        seq_len = emb.shape[1]
+        
+        pad_mask = torch.ones(bsize, seq_len, dtype=torch.bool, device=emb.device)
+        
+        # Attention Mask: [0] -> Context : Full Attention
+        att_mask_val = [0] * seq_len
+        
+        return emb, pad_mask, att_mask_val
+
+
+    def embed_tactile_future(self, tactile_future, timestep):
+
+        time_emb = create_sinusoidal_pos_embedding(
+            timestep, self.tactile_in_proj.out_features, 
+            min_period=4e-3, max_period=4.0, device=timestep.device
+        )
+        time_emb = time_emb.type(dtype=tactile_future.dtype)
+
+        tactile_emb = self.tactile_in_proj(tactile_future)  # (Batch, Tactile_Seq, Dim)
+
+        def time_mlp_func(t_emb):
+            x = self.tactile_time_mlp_in(t_emb)
+            x = F.silu(x)
+            x = self.tactile_time_mlp_out(x)
+            return F.silu(x)
+        
+        adarms_cond = self._apply_checkpoint(time_mlp_func, time_emb)
+        
+
         bsize = tactile_emb.shape[0]
         seq_len = tactile_emb.shape[1]
         
-        # Mask 생성 (Full Attention 가정) ###################### 수정필요 ########################################
         pad_mask = torch.ones(bsize, seq_len, dtype=torch.bool, device=tactile_emb.device)
         
-        # Tactile 내부끼리는 attend (0), 다른 모달리티와의 관계는 att_masks 리스트에서 결정
-        att_mask_val = [0] * seq_len 
+        # Attention Mask: [1] -> Generation 
+        att_mask_val = [1] * seq_len 
         
-        return tactile_emb, pad_mask, att_mask_val
+        return tactile_emb, pad_mask, att_mask_val, adarms_cond
 
 
-    def forward(self, observation, actions, tactile_data, noise=None, time=None) -> Tensor:
+    def forward(self, observation, actions, tactile_history, tactile_future, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
 
         if noise is None:
-            noise = self.sample_noise(actions.shape, actions.device)
+            noise_action = self.sample_noise(actions.shape, actions.device)
+            noise_tactile = self.sample_noise(tactile_future.shape, tactile_future.device)
 
         if time is None:
-            time = self.sample_time(actions.shape[0], actions.device)
+            action_time = self.sample_time(actions.shape[0], actions.device)
+            tactile_time = self.sample_time(tactile_future.shape[0], tactile_future.device)
+
+
 
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions

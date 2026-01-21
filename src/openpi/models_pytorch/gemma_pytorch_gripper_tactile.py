@@ -5,7 +5,7 @@ from transformers import GemmaForCausalLM, PaliGemmaForConditionalGeneration
 from transformers.models.auto import CONFIG_MAPPING
 from transformers.models.gemma import modeling_gemma
 
-class PaliGemmaWithExpertAndTactileJointModel(nn.Module):
+class PaliGemmaWithExpertAndGripperTactileModel(nn.Module):
     def __init__(
         self,
         vlm_config,
