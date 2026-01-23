@@ -138,11 +138,41 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+
+    delta_timestamps = {}
+
+    # Action Horizon 
+    for key in data_config.action_sequence_keys:
+        delta_timestamps[key] = [t / dataset_meta.fps for t in range(action_horizon)]
+    
+    # Tactile history and future length
+    tactile_history_len = getattr(data_config, "tactile_history_horizon", 16)
+    tactile_future_len = getattr(data_config, "tactile_future_horizon", 16)
+
+    if hasattr(data_config, "tactile_sequence_keys"):
+        for key in data_config.tactile_sequence_keys:
+            history_offsets = [t / dataset_meta.fps for t in range(-tactile_history_len, 0)]
+            future_offsets = [t / dataset_meta.fps for t in range(0, tactile_future_len)]
+
+            full_offsets = sorted(list(set(history_offsets + future_offsets)))
+            delta_timestamps[key] = full_offsets
+
+    
+    torque_history_len = getattr(data_config, "torque_history_horizon", 16)
+    torque_future_len = getattr(data_config, "torque_future_horizon", 16)
+
+    if hasattr(data_config, "torque_sequence_keys"):
+        for key in data_config.torque_sequence_keys:
+            history_offsets = [t / dataset_meta.fps for t in range(-torque_history_len, 0)]
+            future_offsets = [t / dataset_meta.fps for t in range(0, torque_future_len)]
+
+            full_offsets = sorted(list(set(history_offsets + future_offsets)))
+            delta_timestamps[key] = full_offsets
+
+
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
+        delta_timestamps=delta_timestamps,
     )
 
     if data_config.prompt_from_task:
@@ -228,7 +258,7 @@ def create_data_loader(
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"] = "jax",
-) -> DataLoader[tuple[_model.Observation, _model.Actions, _model.Tactile]]:
+) -> DataLoader[tuple[_model.Observation, _model.Actions, _model.TactileHistory, _model.TactileFuture]]:
     """Create a data loader for training.
 
     Args:
@@ -281,7 +311,7 @@ def create_torch_data_loader(
     num_workers: int = 0,
     seed: int = 0,
     framework: str = "jax",
-) -> DataLoader[tuple[_model.Observation, _model.Actions, _model.Tactile]]:
+) -> DataLoader[tuple[_model.Observation, _model.Actions, _model.TactileHistory, _model.TactileFuture]]:
     """Create a data loader for training.
 
     Args:
@@ -347,7 +377,7 @@ def create_rlds_data_loader(
     shuffle: bool = False,
     num_batches: int | None = None,
     framework: str = "jax",
-) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
+) -> DataLoader[tuple[_model.Observation, _model.Actions, _model.TactileHistory, _model.TactileFuture]]:
     """Create an RLDS data loader for training.
 
     Note: This data loader requires some extra dependencies -- see examples/droid/README_train.md
@@ -539,5 +569,9 @@ class DataLoaderImpl(DataLoader):
         for batch in self._data_loader:
             obs = _model.Observation.from_dict(batch)
             actions = batch["actions"]
-            tactile = batch.get("tactile", None)
-            yield obs, actions, tactile
+            tactile_history = batch.get("tactile_history", None)
+            tactile_future = batch.get("tactile_future", None)
+            torque_history = batch.get("torque_history", None)
+            torque_future = batch.get("torque_future", None)
+
+            yield obs, actions, tactile_history, tactile_future, torque_history, torque_future

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=pi05_tactile_2stage
+#SBATCH --job-name=pi05_franka_torque_2stage
 #SBATCH --partition=sjw_alinlab_h100
 #SBATCH --nodelist=worker-node1002
 #SBATCH --nodes=1
@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 # [공통 설정]
 # ---------------------------------------------------------------------------
-CONFIG_NAME="decoupled_stream_gripper_tactile"
+CONFIG_NAME="decoupled_stream_franka_torque"
 CHECKPOINT_DIR="/sjw_alinlab2/home/jimin/openpi_feel/checkpoints_icml"
 NUM_WORKERS=8
 BATCH_SIZE=16
@@ -25,10 +25,10 @@ echo "Using Master Port: $MASTER_PORT"
 # ---------------------------------------------------------------------------
 # [Stage 1] Tactile Stream Pre-training (Action Freeze)
 # ---------------------------------------------------------------------------
-STAGE1_EXP_NAME="decoupled_stream_gripper_tactile_stage1"
+STAGE1_EXP_NAME="decoupled_stream_franka_torque_stage1"
 STAGE1_STEPS=5000
 # Stage 1에서는 Tactile Loss가 지배적이도록 설정 (어차피 Action은 Freeze라 0임)
-STAGE1_TACTILE_WEIGHT=1.0
+STAGE1_TORQUE_WEIGHT=1.0
 
 echo "=================================================================="
 echo "Starting Stage 1: Tactile Pre-training (0 ~ $STAGE1_STEPS steps)"
@@ -42,8 +42,9 @@ uv run scripts/train_pytorch.py $CONFIG_NAME \
     --save_interval 5000 \
     --num_train_steps $STAGE1_STEPS \
     --checkpoint_base_dir $CHECKPOINT_DIR \
-    --model.loss_tactile_weight $STAGE1_TACTILE_WEIGHT \
+    --model.loss_torque_weight $STAGE1_TORQUE_WEIGHT \
     --freeze_action_stream
+
 
 # Stage 1 성공 여부 확인
 if [ $? -ne 0 ]; then
@@ -54,9 +55,9 @@ fi
 # ---------------------------------------------------------------------------
 # [Stage 2] Joint Fine-tuning (Unfreeze All)
 # ---------------------------------------------------------------------------
-STAGE2_EXP_NAME="decoupled_stream_gripper_tactile_stage2"
+STAGE2_EXP_NAME="decoupled_stream_franka_torque_stage2"
 TOTAL_STEPS=25000  # 10k(Stage1) + 20k(Add) = 30k Total
-STAGE2_TACTILE_WEIGHT=0.05 # Joint 학습 시 가중치 조절
+STAGE2_TORQUE_WEIGHT=0.05 # Joint 학습 시 가중치 조절
 
 # Stage 1에서 저장된 마지막 체크포인트 경로 (Stage1 Steps -1 step)
 INT_STAGE1_CKPT_PATH=$((STAGE1_STEPS-1))
@@ -77,7 +78,7 @@ uv run scripts/train_pytorch.py $CONFIG_NAME \
     --save_interval 5000 \
     --num_train_steps $TOTAL_STEPS \
     --checkpoint_base_dir $CHECKPOINT_DIR \
-    --model.loss_tactile_weight $STAGE2_TACTILE_WEIGHT \
+    --model.loss_torque_weight $STAGE2_TORQUE_WEIGHT \
     --pytorch_weight_path $STAGE1_CKPT_PATH
 
 echo "All Stages Finished at $(date)"

@@ -126,7 +126,7 @@ class Normalize(DataTransformFn):
     def __call__(self, data: DataDict) -> DataDict:
         if self.norm_stats is None:
             return data
-
+             
         return apply_tree(
             data,
             self.norm_stats,
@@ -458,3 +458,101 @@ def _assert_quantile_stats(norm_stats: at.PyTree[NormStats]) -> None:
             raise ValueError(
                 f"quantile stats must be provided if use_quantile_norm is True. Key {k} is missing q01 or q99."
             )
+
+
+@dataclasses.dataclass(frozen=True)
+class StackGripperTactile(DataTransformFn):
+    """
+    Stacks left/right tactile data.
+    Input : 
+        - 'tactile_left': (T, 15)
+        - 'tactile_right': (T, 15)
+    Output :
+        - 'tactile': (T, 30)
+    """
+    left_key: str = "tactile_left"
+    right_key: str = "tactile_right"
+    out_key: str = "tactile"
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if self.left_key not in data or self.right_key not in data:
+            return data
+
+        left = data.pop(self.left_key)
+        right = data.pop(self.right_key)
+
+        left = np.asarray(left, dtype=np.float32)
+        right = np.asarray(right, dtype=np.float32)
+
+        data[self.out_key] = np.concatenate([left, right], axis=-1) # (T, 30)
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class SplitTactile(DataTransformFn):
+    """
+    Splits the 'tactile' sequence into history (context) and future (target).
+    
+    Input key: 'tactile' (Shape: [T_total, D])
+    Output keys: 
+       - 'tactile_history': data['tactile'][:history_horizon]
+       - 'tactile_future': data['tactile'][history_horizon:]
+    """
+    history_horizon: int
+    future_horizon: int
+    input_key: str = "tactile"
+    history_key: str = "tactile_history"
+    future_key: str = "tactile_future"
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if self.input_key not in data:
+            return data
+
+        full_sequence = data.pop(self.input_key) # (T, D)
+        
+        expected_len = self.history_horizon + self.future_horizon
+        actual_len = full_sequence.shape[0]
+        
+        if actual_len != expected_len:
+            raise ValueError(f"Expected length {expected_len} but got {actual_len} for {self.input_key}")
+
+        # Split
+        # History: [0, ..., 15] (16 steps)
+        data[self.history_key] = full_sequence[:self.history_horizon]
+        
+        # Future: [16, ..., 31] (16 steps)
+        data[self.future_key] = full_sequence[self.history_horizon : self.history_horizon + self.future_horizon]
+
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class SplitTorque(DataTransformFn):
+    """
+    Splits the 'torque' sequence into history (context) and future (target).
+    
+    Input key: 'torque' (Shape: [T_total, D])
+    Output keys: 
+       - 'torque_history': data['torque'][:history_horizon]
+       - 'torque_future': data['torque'][history_horizon:]
+    """
+    history_horizon: int
+    future_horizon: int
+    input_key: str = "torque"
+    history_key: str = "torque_history"
+    future_key: str = "torque_future"
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if self.input_key not in data:
+            return data
+
+        full_sequence = data.pop(self.input_key) # (T, D)
+        expected_len = self.history_horizon + self.future_horizon
+        actual_len = full_sequence.shape[0]
+        if actual_len != expected_len:
+            raise ValueError(f"Expected length {expected_len} but got {actual_len} for {self.input_key}")
+
+        data[self.history_key] = full_sequence[:self.history_horizon]
+        data[self.future_key] = full_sequence[self.history_horizon : self.history_horizon + self.future_horizon]
+
+        return data

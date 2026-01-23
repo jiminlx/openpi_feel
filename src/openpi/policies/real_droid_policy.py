@@ -66,8 +66,18 @@ class DroidInputs(transforms.DataTransformFn):
                 data["prompt"] = data["prompt"].decode("utf-8")
             inputs["prompt"] = data["prompt"]
         
-        if "tactile" in data:
-            inputs["tactile"] = np.asarray(data["tactile"])
+        if "tactile_history" in data:
+            inputs["tactile_history"] = np.asarray(data["tactile_history"])
+
+        if "tactile_future" in data:
+            inputs["tactile_future"] = np.asarray(data["tactile_future"])
+
+        if "torque_history" in data:
+            inputs["torque_history"] = np.asarray(data["torque_history"])
+
+        if "torque_future" in data:
+            inputs["torque_future"] = np.asarray(data["torque_future"])
+
 
         return inputs
 

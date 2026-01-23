@@ -7,7 +7,7 @@ from torch import nn
 import torch.nn.functional as F  # noqa: N812
 
 import openpi.models.gemma as _gemma
-from openpi.models_pytorch.gemma_pytorch_gripper_tactile import PaliGemmaWithExpertAndGripperTactileModel
+from openpi.models_pytorch.gemma_pytorch_franka_torque import PaliGemmaWithExpertAndFrankaTorqueModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
 
 
@@ -81,7 +81,7 @@ def make_att_2d_masks(pad_masks, att_masks):
     return att_2d_masks & pad_2d_masks
 
 
-class PI0PytorchWithGripperTactile(nn.Module):
+class PI0PytorchWithFrankaTorque(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config # PI0Config
@@ -89,21 +89,21 @@ class PI0PytorchWithGripperTactile(nn.Module):
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
-        tactile_expert_config = _gemma.get_config(config.tactile_expert_variant)
+        torque_expert_config = _gemma.get_config(config.torque_expert_variant)
 
-        self.paligemma_with_expert = PaliGemmaWithExpertAndGripperTactileModel(
+        self.paligemma_with_expert = PaliGemmaWithExpertAndFrankaTorqueModel(
             paligemma_config,
             action_expert_config,
-            tactile_expert_config,
+            torque_expert_config,
             use_adarms=[False, True, True] if self.pi05 else [False, False, False],
             precision=config.dtype,
         )
         
-        # Tactile Encoder 
-        # tactile dim: 30 
-        self.tactile_dim = self.config.tactile_input_dim
-        self.tactile_in_proj = nn.Linear(self.tactile_dim, tactile_expert_config.width)
-        self.tactile_out_proj = nn.Linear(tactile_expert_config.width, self.tactile_dim)
+        # Torque Encoder 
+        # torque dim: 7 
+        self.torque_dim = self.config.torque_input_dim
+        self.torque_in_proj = nn.Linear(self.torque_dim, torque_expert_config.width)
+        self.torque_out_proj = nn.Linear(torque_expert_config.width, self.torque_dim)
 
         self.action_in_proj = nn.Linear(32, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, 32)
@@ -112,8 +112,8 @@ class PI0PytorchWithGripperTactile(nn.Module):
             self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
             self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
-            self.tactile_time_mlp_in = nn.Linear(tactile_expert_config.width, tactile_expert_config.width)
-            self.tactile_time_mlp_out = nn.Linear(tactile_expert_config.width, tactile_expert_config.width)
+            self.torque_time_mlp_in = nn.Linear(torque_expert_config.width, torque_expert_config.width)
+            self.torque_time_mlp_out = nn.Linear(torque_expert_config.width, torque_expert_config.width)
 
         else:
             self.state_proj = nn.Linear(32, action_expert_config.width)
@@ -363,11 +363,11 @@ class PI0PytorchWithGripperTactile(nn.Module):
         return embs, pad_masks, att_masks, adarms_cond
 
     
-    def embed_tactile_history(self, tactile_hist):
+    def embed_torque_history(self, torque_hist):
         """
-        tactile_hist: (Batch, Hist_Len, Dim)
+        torque_hist: (Batch, Hist_Len, Dim)
         """
-        emb = self.tactile_in_proj(tactile_hist) # (B, T, Hidden)
+        emb = self.torque_in_proj(torque_hist) # (B, T, Hidden)
         
         bsize = emb.shape[0]
         seq_len = emb.shape[1]
@@ -380,88 +380,88 @@ class PI0PytorchWithGripperTactile(nn.Module):
         return emb, pad_mask, att_mask_val
 
 
-    def embed_tactile_future(self, tactile_future, timestep):
+    def embed_torque_future(self, torque_future, timestep):
 
         time_emb = create_sinusoidal_pos_embedding(
-            timestep, self.tactile_in_proj.out_features, 
+            timestep, self.torque_in_proj.out_features, 
             min_period=4e-3, max_period=4.0, device=timestep.device
         )
-        time_emb = time_emb.type(dtype=tactile_future.dtype)
+        time_emb = time_emb.type(dtype=torque_future.dtype)
 
-        tactile_emb = self.tactile_in_proj(tactile_future)  # (Batch, Tactile_Seq, Dim)
+        torque_emb = self.torque_in_proj(torque_future)  # (Batch, Torque_Seq, Dim)
 
         def time_mlp_func(t_emb):
-            x = self.tactile_time_mlp_in(t_emb)
+            x = self.torque_time_mlp_in(t_emb)
             x = F.silu(x)
-            x = self.tactile_time_mlp_out(x)
+            x = self.torque_time_mlp_out(x)
             return F.silu(x)
         
         adarms_cond = self._apply_checkpoint(time_mlp_func, time_emb)
         
-        bsize = tactile_emb.shape[0]
-        seq_len = tactile_emb.shape[1]
+        bsize = torque_emb.shape[0]
+        seq_len = torque_emb.shape[1]
         
-        pad_mask = torch.ones(bsize, seq_len, dtype=torch.bool, device=tactile_emb.device)
+        pad_mask = torch.ones(bsize, seq_len, dtype=torch.bool, device=torque_emb.device)
         
         # Attention Mask: [1] -> Generation 
         att_mask_val = [1] + [0] * (seq_len - 1)
         
-        return tactile_emb, pad_mask, att_mask_val, adarms_cond
+        return torque_emb, pad_mask, att_mask_val, adarms_cond
 
-    def forward(self, observation, actions, tactile_history, tactile_future, noise=None, time=None) -> Tensor:
+    def forward(self, observation, actions, torque_history, torque_future, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         noise_action = None
-        noise_tactile = None
+        noise_torque = None
 
         action_time = None
-        tactile_time = None
+        torque_time = None
         #import pdb; pdb.set_trace()
         if noise is None:
             noise_action = self.sample_noise(actions.shape, actions.device)
-            noise_tactile = self.sample_noise(tactile_future.shape, tactile_future.device)
+            noise_torque = self.sample_noise(torque_future.shape, torque_future.device)
 
         if time is None:
             bsize = actions.shape[0]
             common_time = self.sample_time(bsize, actions.device)
             action_time = common_time
-            tactile_time = common_time
+            torque_time = common_time
 
         action_time_expanded = action_time[:, None, None]
-        tactile_time_expanded = tactile_time[:, None, None]
+        torque_time_expanded = torque_time[:, None, None]
 
-        # Noisy Actions & Tactile
+        # Noisy Actions & Torque
         t_action = action_time_expanded * noise_action + (1 - action_time_expanded) * actions
         u_action = noise_action - actions
 
-        t_tactile = tactile_time_expanded * noise_tactile + (1 - tactile_time_expanded) * tactile_future
-        u_tactile = noise_tactile - tactile_future
+        t_torque = torque_time_expanded * noise_torque + (1 - torque_time_expanded) * torque_future
+        u_torque = noise_torque - torque_future
 
         # (Stream 1) : Image + Text 
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         
-        # (Stream 2-A) : Tactile History 
-        tactile_hist_emb, tactile_hist_pad_masks, tactile_hist_att_masks = self.embed_tactile_history(tactile_history)
+        # (Stream 2-A) : Torque History 
+        torque_hist_emb, torque_hist_pad_masks, torque_hist_att_masks = self.embed_torque_history(torque_history)
 
-        # (Stream 2-B) : Tactile Future 
-        tactile_future_embs, tactile_future_pad_masks, tactile_future_att_masks, tactile_future_adarms = self.embed_tactile_future(t_tactile, tactile_time)
+        # (Stream 2-B) : Torque Future 
+        torque_future_embs, torque_future_pad_masks, torque_future_att_masks, torque_future_adarms = self.embed_torque_future(t_torque, torque_time)
        
         # (Stream 3) : Action 
         action_embs, action_pad_masks, action_att_masks, action_adarms = self.embed_suffix(state, t_action, action_time)
        
-        # Merging Tactile Stream (History + Future)
-        tactile_full_embs = torch.cat([tactile_hist_emb, tactile_future_embs], dim=1)
-        tactile_pad_masks = torch.cat([tactile_hist_pad_masks, tactile_future_pad_masks], dim=1)
+        # Merging Torque Stream (History + Future)
+        torque_full_embs = torch.cat([torque_hist_emb, torque_future_embs], dim=1)
+        torque_pad_masks = torch.cat([torque_hist_pad_masks, torque_future_pad_masks], dim=1)
 
         # Attention Mask List concat 
-        tactile_attn_masks = tactile_hist_att_masks + tactile_future_att_masks
-        tactile_attn_masks = torch.tensor(tactile_attn_masks, dtype=torch.bool, device=tactile_pad_masks.device)
-        tactile_attn_masks = tactile_attn_masks[None, :].expand(tactile_pad_masks.shape[0], len(tactile_attn_masks))
+        torque_attn_masks = torque_hist_att_masks + torque_future_att_masks
+        torque_attn_masks = torch.tensor(torque_attn_masks, dtype=torch.bool, device=torque_pad_masks.device)
+        torque_attn_masks = torque_attn_masks[None, :].expand(torque_pad_masks.shape[0], len(torque_attn_masks))
         
         # Global Mask Construction 
-        # Order : [Image/Text] -> [Tactile full] -> [Action]
-        pad_masks = torch.cat([prefix_pad_masks, tactile_pad_masks, action_pad_masks], dim=1)
-        att_masks = torch.cat([prefix_att_masks, tactile_attn_masks, action_att_masks], dim=1)
+        # Order : [Image/Text] -> [Torque full] -> [Action]
+        pad_masks = torch.cat([prefix_pad_masks, torque_pad_masks, action_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, torque_attn_masks, action_att_masks], dim=1)
 
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
@@ -470,75 +470,81 @@ class PI0PytorchWithGripperTactile(nn.Module):
         # Casting 
         if self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype == torch.bfloat16:
             prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
-            tactile_full_embs = tactile_full_embs.to(dtype=torch.bfloat16)
+            torque_full_embs = torque_full_embs.to(dtype=torch.bfloat16)
             action_embs = action_embs.to(dtype=torch.bfloat16)
 
         # Forward Pass 
-        def forward_func(prefix_embs, tactile_embs, action_embs, att_2d_masks_4d, position_ids, adarms_cond_tactile, adarms_cond_action):
+        def forward_func(prefix_embs, torque_embs, action_embs, att_2d_masks_4d, position_ids, adarms_cond_torque, adarms_cond_action):
             outputs, _ = self.paligemma_with_expert.forward(
                 attention_mask=att_2d_masks_4d,
                 position_ids=position_ids,
                 past_key_values=None,
-                inputs_embeds=[prefix_embs, tactile_embs, action_embs],
+                inputs_embeds=[prefix_embs, torque_embs, action_embs],
                 use_cache=False,
-                adarms_cond=[None, adarms_cond_tactile, adarms_cond_action], 
+                adarms_cond=[None, adarms_cond_torque, adarms_cond_action], 
             )
-            # outputs: [prefix_out, tactile_out, action_out]
+            # outputs: [prefix_out, torque_out, action_out]
             return outputs[1],outputs[2]
 
-        tactile_out_full, action_out = self._apply_checkpoint(
+        torque_out_full, action_out = self._apply_checkpoint(
             forward_func, 
-            prefix_embs, tactile_full_embs, action_embs, 
+            prefix_embs, torque_full_embs, action_embs, 
             att_2d_masks_4d, position_ids, 
-            tactile_future_adarms, action_adarms
+            torque_future_adarms, action_adarms
         )
 
         # Extraction & Projection & Loss 
 
-        # Extraction Tactile (for future only)
-        future_len = tactile_future_embs.shape[1]
-        tactile_out_future = tactile_out_full[:, -future_len:] # (B, Future_Len, Hidden)
-        tactile_out_future = tactile_out_future.to(dtype=torch.float32)
+        # Extraction Torque (for future only)
+        future_len = torque_future_embs.shape[1]
+        torque_out_future = torque_out_full[:, -future_len:] # (B, Future_Len, Hidden)
+        torque_out_future = torque_out_future.to(dtype=torch.float32)
 
         action_out = action_out[:, -self.config.action_horizon:]
         action_out = action_out.to(dtype=torch.float32)
 
-        def projection_func(tac_out, act_out):
-            return self.tactile_out_proj(tac_out), self.action_out_proj(act_out)
+        def projection_func(torque_out, act_out):
+            return self.torque_out_proj(torque_out), self.action_out_proj(act_out)
 
-        tactile_out_future, action_out = self._apply_checkpoint(projection_func, tactile_out_future, action_out)
+        torque_out_future, action_out = self._apply_checkpoint(projection_func, torque_out_future, action_out)
 
         # loss
-        loss_tactile = F.mse_loss(u_tactile, tactile_out_future, reduction="none").mean()
+        loss_torque = F.mse_loss(u_torque, torque_out_future, reduction="none").mean()
         loss_action = F.mse_loss(u_action, action_out, reduction="none").mean()
-        w_tactile = getattr(self.config, "loss_tactile_weight", 0.1)
+        w_torque = getattr(self.config, "loss_torque_weight", 0.1)
+        
         
         if self.action_out_proj.weight.requires_grad:
-            loss = loss_tactile * w_tactile + loss_action
-            return {"loss_tactile": loss_tactile, "loss_action": loss_action, "loss": loss, "w_tactile": w_tactile}
+            loss = loss_torque * w_torque + loss_action
+            return {"loss_torque": loss_torque, "loss_action": loss_action, "loss": loss, "w_torque": w_torque}
         else:
-            loss = loss_tactile
-
-            return {"loss_tactile": loss_tactile, "loss": loss, "w_tactile": w_tactile}
-        
+            loss = loss_torque
+            return {"loss_torque": loss_torque, "loss": loss, "w_torque": w_torque}
         
 
 
-    def sample_actions(self, device, observation, tactile_history, noise_action=None, noise_tactile=None, num_steps=10) -> tuple[Tensor, Tensor]:
+    #### UPDATED CODE ####
+    @torch.no_grad()
+    def sample_actions(self, device, observation, torque_history, noise_action=None, noise_torque=None, num_steps=10) -> tuple[Tensor, Tensor]:
         """
-        Do a full inference forward and compute the action and future tactile.
-        Returns: (actions, tactile_future)
+        Do a full inference forward and compute the action and future torque.
+        Returns: (actions, torque_future)
         """
         bsize = observation.state.shape[0]
         
+        # 1. Initialize Noise for Action and Torque Future
         if noise_action is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise_action = self.sample_noise(actions_shape, device)
             
-        if noise_tactile is None:
-            tactile_shape = (bsize, self.config.action_horizon, self.config.tactile_input_dim) # same horizon as action
-            noise_tactile = self.sample_noise(tactile_shape, device)
+        if noise_torque is None:
+            # Torque Future shape: (B, Future_Len, Dim)
+            # Assuming torque_input_dim is the dim.
+            # Horizon is inferred from config.action_horizon if not explicitly set for torque
+            torque_shape = (bsize, self.config.action_horizon, self.config.torque_input_dim)
+            noise_torque = self.sample_noise(torque_shape, device)
 
+        # 2. Preprocess and Cache Prefix (Image + Text)
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
@@ -550,102 +556,102 @@ class PI0PytorchWithGripperTactile(nn.Module):
         self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"
 
         # Prefix Forward to get KV Cache
+        # Note: We pass None for Torque and Action slots to match the [Prefix, Torque, Action] structure
         _, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,
             position_ids=prefix_position_ids,
             past_key_values=None,
-            inputs_embeds=[prefix_embs, None, None], # Structure: [Prefix, Tactile, Action]
+            inputs_embeds=[prefix_embs, None, None], 
             use_cache=True,
         )
 
-        # 3. Pre-compute Static Embeddings (Tactile History)
-        # Tactile History is constant throughout denoising
-        tactile_hist_emb, tactile_hist_pad_masks, tactile_hist_att_masks = self.embed_tactile_history(tactile_history)
+        # 3. Pre-compute Static Embeddings (Torque History)
+        # Torque History does not change during the diffusion loop
+        torque_hist_emb, torque_hist_pad_masks, torque_hist_att_masks = self.embed_torque_history(torque_history)
 
         # 4. Denoising Loop
         dt = -1.0 / num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
 
         x_t_action = noise_action
-        x_t_tactile = noise_tactile
+        x_t_torque = noise_torque
         time = torch.tensor(1.0, dtype=torch.float32, device=device)
 
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
             
             # Compute velocity (v_t) for both streams
-            v_t_tactile, v_t_action = self.denoise_step(
+            v_t_torque, v_t_action = self.denoise_step(
                 state,
                 prefix_pad_masks,
                 past_key_values,
-                x_t_tactile,
+                x_t_torque,
                 x_t_action,
-                tactile_hist_emb,
-                tactile_hist_pad_masks,
-                tactile_hist_att_masks,
+                torque_hist_emb,
+                torque_hist_pad_masks,
+                torque_hist_att_masks,
                 expanded_time,
             )
 
             # Euler step
             x_t_action = x_t_action + dt * v_t_action
-            x_t_tactile = x_t_tactile + dt * v_t_tactile
+            x_t_torque = x_t_torque + dt * v_t_torque
             time += dt
 
-        return x_t_action, x_t_tactile
+        return x_t_action, x_t_torque
 
     def denoise_step(
         self,
         state,
         prefix_pad_masks,
         past_key_values,
-        x_t_tactile,
+        x_t_torque,
         x_t_action,
-        tactile_hist_emb,
-        tactile_hist_pad_masks,
-        tactile_hist_att_masks,
+        torque_hist_emb,
+        torque_hist_pad_masks,
+        torque_hist_att_masks,
         timestep,
     ):
-        """Apply one denoising step for both Tactile and Action streams."""
+        """Apply one denoising step for both Torque and Action streams."""
         
-        # --- 1. Embed Dynamic Parts (Tactile Future & Action) ---
+        # --- 1. Embed Dynamic Parts (Torque Future & Action) ---
         
-        # Tactile Future
-        tac_fut_embs, tac_fut_pad_masks, tac_fut_att_masks, adarms_cond_tactile = self.embed_tactile_future(x_t_tactile, timestep)
+        # Torque Future (Noisy)
+        tor_fut_embs, tor_fut_pad_masks, tor_fut_att_masks, adarms_cond_torque = self.embed_torque_future(x_t_torque, timestep)
         
-        # Action
+        # Action (Noisy)
         act_embs, act_pad_masks, act_att_masks, adarms_cond_action = self.embed_suffix(state, x_t_action, timestep)
 
         # --- 2. Construct Full Inputs ---
         
-        # Merge Tactile History + Future
-        tactile_full_embs = torch.cat([tactile_hist_emb, tac_fut_embs], dim=1)
-        tactile_pad_masks = torch.cat([tactile_hist_pad_masks, tac_fut_pad_masks], dim=1)
+        # Merge Torque History + Future
+        torque_full_embs = torch.cat([torque_hist_emb, tor_fut_embs], dim=1)
+        torque_pad_masks = torch.cat([torque_hist_pad_masks, tor_fut_pad_masks], dim=1)
         
-        # Merge Attention Masks for Tactile Stream
-        tactile_attn_masks_list = tactile_hist_att_masks + tac_fut_att_masks
-        tactile_attn_masks = torch.tensor(tactile_attn_masks_list, dtype=torch.bool, device=tactile_pad_masks.device)
+        # Merge Attention Masks for Torque Stream
+        torque_attn_masks_list = torque_hist_att_masks + tor_fut_att_masks
+        torque_attn_masks = torch.tensor(torque_attn_masks_list, dtype=torch.bool, device=torque_pad_masks.device)
         bsize = prefix_pad_masks.shape[0]
-        tactile_attn_masks = tactile_attn_masks[None, :].expand(bsize, len(tactile_attn_masks_list))
+        torque_attn_masks = torque_attn_masks[None, :].expand(bsize, len(torque_attn_masks_list))
 
-        # --- 3. Construct Masks for Attention (Prefix + Tactile + Action) ---
+        # --- 3. Construct Masks for Attention (Prefix + Torque + Action) ---
         
-        # The "Generation" block consists of [Tactile Full, Action]
-        gen_pad_masks = torch.cat([tactile_pad_masks, act_pad_masks], dim=1)
-        gen_att_masks = torch.cat([tactile_attn_masks, act_att_masks], dim=1)
+        # The "Generation" block consists of [Torque Full, Action]
+        gen_pad_masks = torch.cat([torque_pad_masks, act_pad_masks], dim=1)
+        gen_att_masks = torch.cat([torque_attn_masks, act_att_masks], dim=1)
         
         gen_len = gen_pad_masks.shape[1]
         prefix_len = prefix_pad_masks.shape[1]
 
-        # Allow Generation block to attend to Prefix
+        # Allow Generation block to attend to Prefix (via KV Cache)
         # Shape: (Batch, Gen_Len, Prefix_Len)
         prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(bsize, gen_len, prefix_len)
 
-        # Allow Generation block to attend to itself (based on causal/prefix logic)
+        # Allow Generation block to attend to itself
         # Shape: (Batch, Gen_Len, Gen_Len)
         gen_att_2d_masks = make_att_2d_masks(gen_pad_masks, gen_att_masks)
 
         # Concatenate to get mask for [Gen queries] x [Prefix keys, Gen keys]
-        # Note: transformers with use_cache=True expects mask shape (Batch, Current_Len, Past_Len + Current_Len)
         full_att_2d_masks = torch.cat([prefix_pad_2d_masks, gen_att_2d_masks], dim=2)
         full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
 
@@ -656,43 +662,43 @@ class PI0PytorchWithGripperTactile(nn.Module):
 
         # --- 5. Forward Pass ---
         
-        # Determine precision for casting if necessary (matching forward logic)
+        # Precision handling
         if self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype == torch.bfloat16:
-            tactile_full_embs = tactile_full_embs.to(dtype=torch.bfloat16)
+            torque_full_embs = torque_full_embs.to(dtype=torch.bfloat16)
             act_embs = act_embs.to(dtype=torch.bfloat16)
 
         self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"
 
-        # inputs_embeds structure: [Prefix(None), Tactile, Action]
+        # inputs_embeds structure: [Prefix(None), Torque, Action]
+        # We pass None for prefix as we rely on past_key_values
         outputs_embeds, _ = self.paligemma_with_expert.forward(
             attention_mask=full_att_2d_masks_4d,
             position_ids=position_ids,
             past_key_values=past_key_values,
-            inputs_embeds=[None, tactile_full_embs, act_embs],
-            use_cache=False, # We don't need to update cache for the generative part in this specific diffusion implementation
-            adarms_cond=[None, adarms_cond_tactile, adarms_cond_action],
+            inputs_embeds=[None, torque_full_embs, act_embs],
+            use_cache=False, 
+            adarms_cond=[None, adarms_cond_torque, adarms_cond_action],
         )
 
         # --- 6. Extract and Project Outputs ---
         
-        # Outputs: [None, tactile_out, action_out]
-        tactile_out_full = outputs_embeds[1]
+        # Outputs: [None, torque_out, action_out]
+        torque_out_full = outputs_embeds[1]
         action_out = outputs_embeds[2]
 
-        # Extract only the Future part of Tactile
-        future_len = tac_fut_embs.shape[1]
-        tactile_out_future = tactile_out_full[:, -future_len:]
+        # Extract only the Future part of Torque
+        future_len = tor_fut_embs.shape[1]
+        torque_out_future = torque_out_full[:, -future_len:]
         
         # Extract Action (Action horizon)
         action_out = action_out[:, -self.config.action_horizon:]
 
         # Cast to float32 for diffusion step
-        tactile_out_future = tactile_out_future.to(dtype=torch.float32)
+        torque_out_future = torque_out_future.to(dtype=torch.float32)
         action_out = action_out.to(dtype=torch.float32)
 
         # Project to original space
-        v_t_tactile = self.tactile_out_proj(tactile_out_future)
+        v_t_torque = self.torque_out_proj(torque_out_future)
         v_t_action = self.action_out_proj(action_out)
 
-
-        return v_t_tactile, v_t_action
+        return v_t_action, v_t_torque

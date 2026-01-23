@@ -99,8 +99,7 @@ def main(config_name: str, max_frames: int | None = None):
             data_config, config.model.action_horizon, 8, config.model, config.num_workers, max_frames
         )
 
-    keys = ["state", "actions", "tactile"]
-    # tactile dim : 30 
+    keys = ["state", "actions", "torque_history", "torque_future"]
     stats = {key: normalize.RunningStats() for key in keys}
 
     
@@ -117,3 +116,6 @@ def main(config_name: str, max_frames: int | None = None):
 
 if __name__ == "__main__":
     tyro.cli(main)
+
+
+# uv run scripts/compute_norm_stats.py --config-name decoupled_stream_gripper_tactile_franka_torque

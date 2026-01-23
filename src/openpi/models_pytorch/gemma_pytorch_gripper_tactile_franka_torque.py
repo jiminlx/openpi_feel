@@ -5,17 +5,18 @@ from transformers import GemmaForCausalLM, PaliGemmaForConditionalGeneration
 from transformers.models.auto import CONFIG_MAPPING
 from transformers.models.gemma import modeling_gemma
 
-class PaliGemmaWithExpertAndGripperTactileModel(nn.Module):
+class PaliGemmaWithExpertAndGripperTactileFrankaTorqueModel(nn.Module):
     def __init__(
         self,
         vlm_config,
         action_expert_config,
         tactile_expert_config,
+        torque_expert_config,
         use_adarms=None,
         precision: Literal["bfloat16", "float32"] = "bfloat16",
     ):
         if use_adarms is None:
-            use_adarms = [False, True, True] # [VLM, Tactile, Action]
+            use_adarms = [False, True, True] # [VLM, Torque, Action]
         super().__init__()
 
         vlm_config_hf = CONFIG_MAPPING["paligemma"]()
@@ -37,6 +38,7 @@ class PaliGemmaWithExpertAndGripperTactileModel(nn.Module):
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
         vlm_config_hf.vision_config.torch_dtype = "float32"
         
+        
         # Tactile Expert Config (Gemma)
         tactile_expert_config_hf = CONFIG_MAPPING["gemma"](
             head_dim=tactile_expert_config.head_dim,
@@ -52,6 +54,21 @@ class PaliGemmaWithExpertAndGripperTactileModel(nn.Module):
             adarms_cond_dim=tactile_expert_config.width if use_adarms[1] else None,
         )
 
+        # Torque Expert Config (Gemma)
+        torque_expert_config_hf = CONFIG_MAPPING["gemma"](
+            head_dim=torque_expert_config.head_dim,
+            hidden_size=torque_expert_config.width,
+            intermediate_size=torque_expert_config.mlp_dim,
+            num_attention_heads=torque_expert_config.num_heads,
+            num_hidden_layers=torque_expert_config.depth,
+            num_key_value_heads=torque_expert_config.num_kv_heads,
+            vocab_size=257152,
+            hidden_activation="gelu_pytorch_tanh",
+            torch_dtype="float32",
+            use_adarms=use_adarms[2], # Index 2 for Torque
+            adarms_cond_dim=torque_expert_config.width if use_adarms[1] else None,
+        )
+
         # Action Expert Config 
         action_expert_config_hf = CONFIG_MAPPING["gemma"](
             head_dim=action_expert_config.head_dim,
@@ -63,17 +80,19 @@ class PaliGemmaWithExpertAndGripperTactileModel(nn.Module):
             vocab_size=257152,
             hidden_activation="gelu_pytorch_tanh",
             torch_dtype="float32",
-            use_adarms=use_adarms[2], # Index 2 for Action
-            adarms_cond_dim=action_expert_config.width if use_adarms[1] else None,
+            use_adarms=use_adarms[3], # Index 3 for Action
+            adarms_cond_dim=action_expert_config.width if use_adarms[3] else None,
         )
 
         # model init
         self.paligemma = PaliGemmaForConditionalGeneration(config=vlm_config_hf)
         self.tactile_expert = GemmaForCausalLM(config=tactile_expert_config_hf)
+        self.torque_expert = GemmaForCausalLM(config=torque_expert_config_hf)
         self.gemma_expert = GemmaForCausalLM(config=action_expert_config_hf)
 
         # Embedding layer remove (use external embedding)
         self.tactile_expert.model.embed_tokens = None
+        self.torque_expert.model.embed_tokens = None
         self.gemma_expert.model.embed_tokens = None
 
         self.to_bfloat16_for_selected_params(precision)
@@ -111,16 +130,16 @@ class PaliGemmaWithExpertAndGripperTactileModel(nn.Module):
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
         past_key_values: list[torch.FloatTensor] | None = None,
-        inputs_embeds: list[torch.FloatTensor] | None = None, # [VLM, Tactile, Action] 순서 예상
+        inputs_embeds: list[torch.FloatTensor] | None = None, # [VLM, Torque, Action] 순서 예상
         use_cache: bool | None = None,
         adarms_cond: list[torch.Tensor] | None = None,
     ):
-        # inputs_embeds = [vlm_emb, tactile_emb, action_emb]
+        # inputs_embeds = [vlm_emb, tactile_emb, torque_emb, action_emb]
         if adarms_cond is None:
-            adarms_cond = [None, None, None]
+            adarms_cond = [None, None, None, None]
         
-        # Models: [VLM, Tactile, Action]
-        models = [self.paligemma.language_model, self.tactile_expert.model, self.gemma_expert.model]
+        # Models: [VLM, Tactile, Torque, Action]
+        models = [self.paligemma.language_model, self.tactile_expert.model, self.torque_expert.model, self.gemma_expert.model]
         num_layers = self.paligemma.config.text_config.num_hidden_layers
 
         # Gradient Checkpointing setup
@@ -132,7 +151,7 @@ class PaliGemmaWithExpertAndGripperTactileModel(nn.Module):
 
         # Core Logic: 3-Stream Joint Attention Layer
         def compute_layer_complete(layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond):
-            # inputs_embeds : [Tensor(VLM), Tensor(Tactile), Tensor(Action)] list
+            # inputs_embeds : [Tensor(VLM), Tensor(Tactile), Tensor(Torque), Tensor(Action)] list
             
             query_states = []
             key_states = []

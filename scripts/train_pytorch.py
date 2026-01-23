@@ -41,6 +41,9 @@ import tqdm
 import wandb
 
 import openpi.models.pi0_config
+import openpi.models_pytorch.pi0_pytorch_gripper_tactile_franka_torque
+import openpi.models_pytorch.pi0_pytorch_franka_torque
+import openpi.models_pytorch.pi0_pytorch_gripper_tactile
 import openpi.models_pytorch.pi0_pytorch
 import openpi.shared.normalize as _normalize
 import openpi.training.config as _config
@@ -359,12 +362,15 @@ def train_loop(config: _config.TrainConfig):
     loader, data_config = build_datasets(config)
 
     # Log sample images to wandb on first batch
-    if is_main and config.wandb_enabled and not resuming:
+    if is_main and config.wandb_enabled and not resuming and False :
         # Create a separate data loader for sample batch to avoid consuming the main loader
         sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False)
         sample_batch = next(iter(sample_data_loader))
         # Convert observation and actions to torch tensors
-        observation, actions, tactile = sample_batch
+        
+        observation = sample_batch[0]
+        actions = sample_batch[1]
+
         sample_batch = observation.to_dict()
         sample_batch["actions"] = actions
 
@@ -399,14 +405,70 @@ def train_loop(config: _config.TrainConfig):
             max_token_len=config.model.max_token_len,
             paligemma_variant=getattr(config.model, "paligemma_variant", "gemma_2b"),
             action_expert_variant=getattr(config.model, "action_expert_variant", "gemma_300m"),
+            tactile_expert_variant=getattr(config.model, "tactile_expert_variant", "gemma_300m"),
+            torque_expert_variant=getattr(config.model, "torque_expert_variant", "gemma_300m"),
             pi05=getattr(config.model, "pi05", False),
+            tactile_input_dim=getattr(config.model, "tactile_input_dim", 30),
+            torque_input_dim=getattr(config.model, "torque_input_dim", 7),
+            loss_tactile_weight=getattr(config.tactile_loss_weight, "loss_tactile_weight", 0.5),
+            loss_torque_weight=getattr(config.model, "loss_torque_weight", 0.5),
         )
     else:
         model_cfg = config.model
         # Update dtype to match pytorch_training_precision
         object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
-    model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
+    if config.name == "naive_base":
+        print("\033[94mUploaded Naive Base Model\033[0m")
+        model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
+    elif config.name == "decoupled_stream_gripper_tactile":
+        print("\033[92mUploaded Decoupled Stream Gripper Tactile Model\033[0m")
+        model = openpi.models_pytorch.pi0_pytorch_gripper_tactile.PI0PytorchWithGripperTactile(model_cfg).to(device)
+        if config.freeze_action_stream:
+            logging.info("\033[91mSTAGE 1: Freezing Action Stream based on config!\033[0m")
+            if hasattr(model, "module"):
+                model.module.set_action_stream_trainable(False)
+            else:
+                model.set_action_stream_trainable(False)
+        else:
+            logging.info("\033[92mSTAGE 2: Unfreezing Action Stream (Full Finetuning)!\033[0m")
+            if hasattr(model, "module"):
+                model.module.set_action_stream_trainable(True)
+            else:
+                model.set_action_stream_trainable(True)
+    elif config.name =="decoupled_stream_franka_torque":
+        print("\033[92mUploaded Decoupled Stream Franka Torque Model\033[0m")
+        model = openpi.models_pytorch.pi0_pytorch_franka_torque.PI0PytorchWithFrankaTorque(model_cfg).to(device)
+        if config.freeze_action_stream:
+            logging.info("\033[91mSTAGE 1: Freezing Action Stream based on config!\033[0m")
+            if hasattr(model, "module"):
+                model.module.set_action_stream_trainable(False)
+            else:
+                model.set_action_stream_trainable(False)
+        else:
+            logging.info("\033[92mSTAGE 2: Unfreezing Action Stream (Full Finetuning)!\033[0m")
+            if hasattr(model, "module"):
+                model.module.set_action_stream_trainable(True)
+            else:
+                model.set_action_stream_trainable(True)
+
+    elif config.name == "decoupled_stream_gripper_tactile_franka_torque":
+        print("\033[92mUploaded Decoupled Stream Gripper Tactile Franka Torque Model\033[0m")
+        model = openpi.models_pytorch.pi0_pytorch_gripper_tactile_franka_torque.PI0PytorchWithGripperTactileFrankaTorque(model_cfg).to(device)
+        if config.freeze_action_stream:
+            logging.info("\033[91mSTAGE 1: Freezing Action Stream based on config!\033[0m")
+            if hasattr(model, "module"):
+                model.module.set_action_stream_trainable(False)
+            else:
+                model.set_action_stream_trainable(False)
+        else:
+            logging.info("\033[92mSTAGE 2: Unfreezing Action Stream based on config!\033[0m")
+            if hasattr(model, "module"):
+                model.module.set_action_stream_trainable(True)
+            else:
+                model.set_action_stream_trainable(True)
+    else:
+        raise ValueError(f"Invalid model config: {config.name}. You need to map with the config.py")
 
     if hasattr(model, "gradient_checkpointing_enable"):
         enable_gradient_checkpointing = True
@@ -511,31 +573,54 @@ def train_loop(config: _config.TrainConfig):
         if use_ddp and hasattr(loader, "set_epoch"):
             loader.set_epoch(global_step // len(loader))
 
-        for observation, actions, tactile in loader:
+        for observation, actions, tactile_history, tactile_future, torque_history, torque_future in loader:
             # Check if we've reached the target number of steps
             if global_step >= config.num_train_steps:
                 break
 
-            # The unified data loader returns (observation, actions) tuple
-            observation = jax.tree.map(lambda x: x.to(device), observation)  # noqa: PLW2901
-            actions = actions.to(torch.float32)  # noqa: PLW2901
-            tactile = tactile.to(torch.float32)  # noqa: PLW2901
-            actions = actions.to(device)  # noqa: PLW2901
-            tactile = tactile.to(device)  # noqa: PLW2901
+            if tactile_history is not None:
+                tactile_history = tactile_history.to(device).to(torch.float32)
+            if tactile_future is not None:
+                tactile_future = tactile_future.to(device).to(torch.float32)
+                
+            if torque_history is not None:
+                torque_history = torque_history.to(device).to(torch.float32)
+            if torque_future is not None:
+                torque_future = torque_future.to(device).to(torch.float32)
 
+
+            observation = jax.tree.map(lambda x: x.to(device), observation)  # noqa: PLW2901
+            actions = actions.to(device).to(torch.float32)  # noqa: PLW2901
+            
             # Update LR
             for pg in optim.param_groups:
                 pg["lr"] = lr_schedule(global_step)
 
-            # Forward pass
-            losses = model(observation, actions)
-            # Ensure losses is a tensor and handle different return types
-            if isinstance(losses, list | tuple):
-                losses = torch.stack(losses)
-            elif not isinstance(losses, torch.Tensor):
-                losses = torch.tensor(losses, device=device, dtype=torch.float32)
+            
 
-            loss = losses.mean()
+            # Forward pass
+            extra_args = {}
+            if tactile_history is not None:
+                extra_args["tactile_history"] = tactile_history
+            if tactile_future is not None:
+                extra_args["tactile_future"] = tactile_future
+            if torque_history is not None:
+                extra_args["torque_history"] = torque_history
+            if torque_future is not None:
+                extra_args["torque_future"] = torque_future
+
+            losses = model(observation, actions, **extra_args)
+            
+            total_loss = losses["loss"]
+
+
+            # Ensure losses is a tensor and handle different return types
+            if isinstance(total_loss, list | tuple):
+                total_loss = torch.stack(total_loss)
+            elif not isinstance(total_loss, torch.Tensor):
+                total_loss = torch.tensor(total_loss, device=device, dtype=torch.float32)
+
+            loss = total_loss.mean()
 
             # Backward pass
             loss.backward()
@@ -589,14 +674,26 @@ def train_loop(config: _config.TrainConfig):
 
                 # Log to wandb
                 if config.wandb_enabled and len(infos) > 0:
+
                     log_payload = {
                         "loss": avg_loss,
                         "learning_rate": avg_lr,
                         "step": global_step,
                         "time_per_step": elapsed / config.log_interval,
+                        "grad_norm": avg_grad_norm,
                     }
-                    if avg_grad_norm is not None:
-                        log_payload["grad_norm"] = avg_grad_norm
+                    # Safely add optional loss components if they exist
+                    if "loss_tactile" in losses:
+                        log_payload["loss_tactile"] = losses["loss_tactile"]
+                    if "loss_torque" in losses:
+                        log_payload["loss_torque"] = losses["loss_torque"]
+                    if "loss_action" in losses:
+                        log_payload["loss_action"] = losses["loss_action"]
+                    if "w_tactile" in losses:
+                        log_payload["w_tactile"] = losses["w_tactile"]
+                    if "w_torque" in losses:
+                        log_payload["w_torque"] = losses["w_torque"]
+
                     wandb.log(log_payload, step=global_step)
 
                 start_time = time.time()
@@ -627,6 +724,7 @@ def train_loop(config: _config.TrainConfig):
 def main():
     init_logging()
     config = _config.cli()
+    print(f"\n\n[DEBUG CHECK] Checkpoint will be saved to: {config.checkpoint_dir}\n\n")
     train_loop(config)
 
 

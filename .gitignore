@@ -1,5 +1,7 @@
 # Data directories.
 checkpoints/
+checkpoints_icml/
+slurm_train_logs/
 data/
 wandb/
 

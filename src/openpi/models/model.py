@@ -140,7 +140,10 @@ class Observation(Generic[ArrayT]):
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
 # produced by the data transforms.
 Actions = at.Float[ArrayT, "*b ah ad"]
-Tactile = at.Float[ArrayT, "*b ns d"]
+
+TactileHistory = at.Float[ArrayT, "*b th d"] # Context
+TactileFuture = at.Float[ArrayT, "*b tf d"]  # Target
+
 
 
 def preprocess_observation(
@@ -253,16 +256,18 @@ class BaseModelConfig(abc.ABC):
         self, *, batch_size: int = 1, with_tactile: bool = False
     ) -> Union[
         tuple[Observation, Actions],
-        tuple[Observation, Actions, Optional[Tactile]]
+        tuple[Observation, Actions, Optional[TactileHistory], Optional[TactileFuture]]
     ]:
         """Returns the input specification for the model. Values are jax.ShapeDtypeStruct."""
 
     def fake_obs(self, batch_size: int = 1) -> Observation:
-        observation_spec, _ = self.inputs_spec(batch_size=batch_size)
+        specs = self.inputs_spec(batch_size=batch_size)
+        observation_spec = specs[0]
         return jax.tree.map(lambda x: jnp.ones(x.shape, x.dtype), observation_spec)
 
     def fake_act(self, batch_size: int = 1) -> Actions:
-        _, action_spec = self.inputs_spec(batch_size=batch_size)
+        specs = self.inputs_spec(batch_size=batch_size)
+        action_spec = specs[1]
         return jax.tree.map(lambda x: jnp.ones(x.shape, x.dtype), action_spec)
 
 
@@ -282,12 +287,20 @@ class BaseModel(nnx.Module, abc.ABC):
         rng: at.KeyArrayLike,
         observation: Observation,
         actions: Actions,
+        tactile_history: Optional[TactileHistory] = None,
+        tactile_future: Optional[TactileFuture] = None,
         *,
         train: bool = False,
     ) -> at.Float[at.Array, "*b ah"]: ...
 
     @abc.abstractmethod
-    def sample_actions(self, rng: at.KeyArrayLike, observation: Observation, **kwargs) -> Actions: ...
+    def sample_actions(
+        self, 
+        rng: at.KeyArrayLike, 
+        observation: Observation,
+        tactile_history: Optional[TactileHistory] = None,
+        **kwargs
+    ) -> Actions: ...
 
 
 def restore_params(

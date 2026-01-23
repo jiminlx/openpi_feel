@@ -20,11 +20,18 @@ class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
+    tactile_expert_variant: _gemma.Variant = "gemma_300m"
+    torque_expert_variant: _gemma.Variant = "gemma_300m"
 
     # Set the model specific defaults.
     action_dim: int = 32
     action_horizon: int = 50
     max_token_len: int = None  # type: ignore
+
+    tactile_input_dim: int = 30
+    loss_tactile_weight: float = 0.05
+    torque_input_dim: int = 7
+    loss_torque_weight: float = 0.05
     # Pi05 has two differences from Pi0:
     # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
     # - the action expert uses adaRMSNorm to inject the flow matching timestep

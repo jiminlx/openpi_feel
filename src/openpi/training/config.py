@@ -90,6 +90,16 @@ class DataConfig:
     # LeRobot dataset is using different keys to represent the action.
     action_sequence_keys: Sequence[str] = ("actions",)
 
+    tactile_sequence_keys: Sequence[str] = ("observation.tactile",)
+    tactile_history_horizon: int = 16
+    tactile_future_horizon: int = 16
+
+    torque_sequence_keys: Sequence[str] = ("observation.torque",)
+    torque_history_horizon: int = 16
+    torque_future_horizon: int = 16
+
+    freeze_action_stream: bool = False
+
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
@@ -254,6 +264,7 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             ]
         )
     )
+
     # Action keys that will be used to read the action sequence from the dataset.
     action_sequence_keys: Sequence[str] = ("action",)
 
@@ -505,6 +516,15 @@ class StackGripperTactile:
 class LeRobotRealDroidDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+
+        base_cfg = self.create_base_config(assets_dirs, model_config)
+        new_norm_stats = base_cfg.norm_stats
+        if new_norm_stats is not None and "tactile" in new_norm_stats:
+            new_norm_stats = new_norm_stats.copy()
+            tactile_stats = new_norm_stats["tactile"]
+            new_norm_stats["tactile_history"] = tactile_stats
+            new_norm_stats["tactile_future"] = tactile_stats
+
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -518,13 +538,26 @@ class LeRobotRealDroidDataConfig(DataConfigFactory):
                         "tactile_right": "observation.tactile.right",
                     }
                 ),
-                StackGripperTactile(),
             ]
         )
 
+        tactile_stack = _transforms.StackGripperTactile()
+        
+        # Important: This splitting happens AFTER the Data Loader has constructed 
+        # the time sequence based on delta_timestamps.
+        tactile_split = _transforms.SplitTactile(
+            history_horizon=16,
+            future_horizon=16
+        )
+        
+
         # We assume joint *velocity* actions, so we should *not* apply an additional delta transform.
         data_transforms = _transforms.Group(
-            inputs=[real_droid_policy.DroidInputs(model_type=model_config.model_type)],
+            inputs=[
+                tactile_stack,
+                tactile_split,
+                real_droid_policy.DroidInputs(model_type=model_config.model_type),
+            ],
             outputs=[real_droid_policy.DroidOutputs()],
         )
 
@@ -539,11 +572,169 @@ class LeRobotRealDroidDataConfig(DataConfigFactory):
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
+            norm_stats=new_norm_stats,
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            tactile_sequence_keys=("observation.tactile.left", "observation.tactile.right"),
+            tactile_history_horizon=16,
+            tactile_future_horizon=16,
         )
 
+
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRealDroidTorqueDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+
+        base_cfg = self.create_base_config(assets_dirs, model_config)
+        new_norm_stats = base_cfg.norm_stats
+        if new_norm_stats is not None and "torque" in new_norm_stats:
+            new_norm_stats = new_norm_stats.copy()
+            torque_stats = new_norm_stats["torque"]
+            new_norm_stats["torque_history"] = torque_stats
+            new_norm_stats["torque_future"] = torque_stats
+
+
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/exterior_image": "observation.images.34022131_left", # 34022131 : exterior
+                        "observation/wrist_image": "observation.images.10623639_left", # 10623639 : wrist
+                        "observation/state": "observation.state",
+                        "actions": "actions",
+                        "prompt": "prompt", 
+                        "torque": "observation.torque",
+                    }
+                ),
+            ]
+        )
+
+        torque_split = _transforms.SplitTorque(
+            history_horizon=16,
+            future_horizon=16
+        )
+
+
+        # We assume joint *velocity* actions, so we should *not* apply an additional delta transform.
+        data_transforms = _transforms.Group(
+            inputs=[
+                torque_split,
+                real_droid_policy.DroidInputs(model_type=model_config.model_type),
+            ],
+            outputs=[real_droid_policy.DroidOutputs()],
+        )
+
+        # the delta action transform 
+        delta_action_mask = _transforms.make_bool_mask(7, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            norm_stats=new_norm_stats,
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            tactile_sequence_keys=(),
+            torque_sequence_keys=("observation.torque",),
+            torque_history_horizon=16,
+            torque_future_horizon=16,
+        )
+
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRealDroidTactileTorqueDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+
+        base_cfg = self.create_base_config(assets_dirs, model_config)
+        new_norm_stats = base_cfg.norm_stats
+        if new_norm_stats is not None and "torque" in new_norm_stats:
+            new_norm_stats = new_norm_stats.copy()
+            torque_stats = new_norm_stats["torque"]
+            new_norm_stats["torque_history"] = torque_stats
+            new_norm_stats["torque_future"] = torque_stats
+
+        if new_norm_stats is not None and "tactile" in new_norm_stats:
+            new_norm_stats = new_norm_stats.copy()
+            tactile_stats = new_norm_stats["tactile"]
+            new_norm_stats["tactile_history"] = tactile_stats
+            new_norm_stats["tactile_future"] = tactile_stats
+
+
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/exterior_image": "observation.images.34022131_left", # 34022131 : exterior
+                        "observation/wrist_image": "observation.images.10623639_left", # 10623639 : wrist
+                        "observation/state": "observation.state",
+                        "actions": "actions",
+                        "prompt": "prompt", 
+                        "tactile_left": "observation.tactile.left",
+                        "tactile_right": "observation.tactile.right",
+                        "torque": "observation.torque",
+                    }
+                ),
+            ]
+        )
+
+        tactile_stack = _transforms.StackGripperTactile()
+        
+        # Important: This splitting happens AFTER the Data Loader has constructed 
+        # the time sequence based on delta_timestamps.
+        tactile_split = _transforms.SplitTactile(
+            history_horizon=16,
+            future_horizon=16
+        )
+        
+        torque_split = _transforms.SplitTorque(
+            history_horizon=16,
+            future_horizon=16
+        )
+        
+        # We assume joint *velocity* actions, so we should *not* apply an additional delta transform.
+        data_transforms = _transforms.Group(
+            inputs=[
+                tactile_stack,
+                tactile_split,
+                torque_split,
+                real_droid_policy.DroidInputs(model_type=model_config.model_type),
+            ],
+            outputs=[real_droid_policy.DroidOutputs()],
+        )
+
+        # the delta action transform 
+        delta_action_mask = _transforms.make_bool_mask(7, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            norm_stats=new_norm_stats,
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            tactile_sequence_keys=("observation.tactile.left", "observation.tactile.right"),
+            tactile_history_horizon=16,
+            tactile_future_horizon=16,
+            torque_sequence_keys=("observation.torque",),
+            torque_history_horizon=16,
+            torque_future_horizon=16,
+        )
 
 
 
@@ -619,6 +810,12 @@ class TrainConfig:
     # eg. if total device is 4 and fsdp devices is 2; then the model will shard to 2 devices and run
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
+
+    tactile_loss_weight: float = 1.0
+
+    torque_loss_weight: float = 1.0
+
+    freeze_action_stream: bool = False
 
     @property
     def assets_dirs(self) -> pathlib.Path:
@@ -1063,7 +1260,7 @@ _CONFIGS = [
 # 5. TAVLAFrankaTorque / 6. TAVLAXArmTorque / 7. DecoupledStreamFrankaTorque / 8. DecoupledStreamGripperTactile 
 # 9. DecoupledStreamHandForce / 10. DecoupledStreamXArmTorque
 # 11. DecoupledStreamGripperTactileFrankaTorque / 12. DecoupledStreamHandForceXArmTorque
-# Implementation Needed : 1, 2, 5, 6, 7, 8, 9, 10, 11, 12
+# Implementation Needed : 1, 2, 5, 6, 7, 8(o), 9, 10, 11(o), 12
 
     TrainConfig(
         name="naive_base", # 1
@@ -1080,7 +1277,7 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=60_000,
+        num_train_steps=30_000,
     ),
 
     TrainConfig(
@@ -1094,12 +1291,47 @@ _CONFIGS = [
             repo_id="easyminnn/pi05_4tasks_final",
             base_config=DataConfig(
                 prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+
+    TrainConfig(
+        name="decoupled_stream_franka_torque", # 7
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32, # pi05 is trained with 32-dim actions
+            action_horizon=16, 
+        ),
+        data=LeRobotRealDroidTorqueDataConfig(
+            repo_id="easyminnn/pi05_4tasks_final",
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+
+    TrainConfig(
+        name="decoupled_stream_gripper_tactile_franka_torque", # 11
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32, # pi05 is trained with 32-dim actions
+            action_horizon=16, 
+            ),
+        data=LeRobotRealDroidTactileTorqueDataConfig(
+            repo_id="easyminnn/pi05_4tasks_final",
+            base_config=DataConfig(
+                prompt_from_task=True,
                 #action_sequence_keys=("actions",), # or "action" # : **DEBUG** needed
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=60_000,
+        num_train_steps=30_000,
     ),
+
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
