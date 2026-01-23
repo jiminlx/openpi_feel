@@ -744,7 +744,7 @@ class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
     # Project name.
-    project_name: str = "openpi_feel"
+    project_name: str = "PI05-TACTILE"
     # Experiment name. Will be used to name the metadata and checkpoint directories.
     exp_name: str = tyro.MISSING
 
@@ -1326,6 +1326,26 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=True,
                 #action_sequence_keys=("actions",), # or "action" # : **DEBUG** needed
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+
+    # ForceVLA: LIMoE-based tactile fusion (ported from ForceVLA codebase)
+    # Uses single tactile timestep (last from history) for LIMoE fusion
+    # No tactile prediction loss - only action prediction
+    TrainConfig(
+        name="forcevla_gripper_tactile",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+        ),
+        data=LeRobotRealDroidDataConfig(
+            repo_id="easyminnn/pi05_4tasks_final",
+            base_config=DataConfig(
+                prompt_from_task=True,
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),

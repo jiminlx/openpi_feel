@@ -45,6 +45,7 @@ import openpi.models_pytorch.pi0_pytorch_gripper_tactile_franka_torque
 import openpi.models_pytorch.pi0_pytorch_franka_torque
 import openpi.models_pytorch.pi0_pytorch_gripper_tactile
 import openpi.models_pytorch.pi0_pytorch
+import openpi.models_pytorch.pi0_pytorch_forcevla
 import openpi.shared.normalize as _normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data
@@ -467,6 +468,9 @@ def train_loop(config: _config.TrainConfig):
                 model.module.set_action_stream_trainable(True)
             else:
                 model.set_action_stream_trainable(True)
+    elif config.name == "forcevla_gripper_tactile":
+        print("\033[95mUploaded ForceVLA Gripper Tactile Model (LIMoE-based)\033[0m")
+        model = openpi.models_pytorch.pi0_pytorch_forcevla.PI0PytorchForceVLA(model_cfg).to(device)
     else:
         raise ValueError(f"Invalid model config: {config.name}. You need to map with the config.py")
 
@@ -568,6 +572,32 @@ def train_loop(config: _config.TrainConfig):
         else None
     )
 
+    train_dtype = model_cfg.dtype
+    if isinstance(train_dtype, str):
+        _dtype_map = {
+            "bf16": torch.bfloat16,
+            "bfloat16": torch.bfloat16,
+            "fp16": torch.float16,
+            "float16": torch.float16,
+            "fp32": torch.float32,
+            "float32": torch.float32,
+        }
+        key = train_dtype.lower()
+        if key not in _dtype_map:
+            raise ValueError(f"Unsupported dtype string: {train_dtype}")
+        train_dtype = _dtype_map[key]
+
+    use_autocast = (device.type == "cuda") and (train_dtype in (torch.float16, torch.bfloat16))
+
+    def _to_device(x):
+        return x.to(device)
+
+    def _to_train_dtype(x):
+        x = x.to(device)
+        if torch.is_floating_point(x):
+            x = x.to(train_dtype)
+        return x
+
     while global_step < config.num_train_steps:
         # Set epoch for distributed training
         if use_ddp and hasattr(loader, "set_epoch"):
@@ -579,26 +609,31 @@ def train_loop(config: _config.TrainConfig):
                 break
 
             if tactile_history is not None:
-                tactile_history = tactile_history.to(device).to(torch.float32)
+                tactile_history = tactile_history.to(device)
+                if torch.is_floating_point(tactile_history):
+                    tactile_history = tactile_history.to(train_dtype)
             if tactile_future is not None:
-                tactile_future = tactile_future.to(device).to(torch.float32)
-                
+                tactile_future = tactile_future.to(device)
+                if torch.is_floating_point(tactile_future):
+                    tactile_future = tactile_future.to(train_dtype)
+
             if torque_history is not None:
-                torque_history = torque_history.to(device).to(torch.float32)
+                torque_history = torque_history.to(device)
+                if torch.is_floating_point(torque_history):
+                    torque_history = torque_history.to(train_dtype)
             if torque_future is not None:
-                torque_future = torque_future.to(device).to(torch.float32)
+                torque_future = torque_future.to(device)
+                if torch.is_floating_point(torque_future):
+                    torque_future = torque_future.to(train_dtype)
 
+            observation = jax.tree.map(_to_train_dtype, observation)  # noqa: PLW2901
+            actions = actions.to(device)
+            if torch.is_floating_point(actions):
+                actions = actions.to(train_dtype)  # noqa: PLW2901
 
-            observation = jax.tree.map(lambda x: x.to(device), observation)  # noqa: PLW2901
-            actions = actions.to(device).to(torch.float32)  # noqa: PLW2901
-            
-            # Update LR
             for pg in optim.param_groups:
                 pg["lr"] = lr_schedule(global_step)
 
-            
-
-            # Forward pass
             extra_args = {}
             if tactile_history is not None:
                 extra_args["tactile_history"] = tactile_history
@@ -609,7 +644,11 @@ def train_loop(config: _config.TrainConfig):
             if torque_future is not None:
                 extra_args["torque_future"] = torque_future
 
-            losses = model(observation, actions, **extra_args)
+            if use_autocast:
+                with torch.autocast(device_type="cuda", dtype=train_dtype):
+                    losses = model(observation, actions, **extra_args)
+            else:
+                losses = model(observation, actions, **extra_args)
             
             total_loss = losses["loss"]
 
