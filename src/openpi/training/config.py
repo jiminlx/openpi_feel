@@ -1280,6 +1280,42 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
 
+    # temp
+    TrainConfig(
+        name="naive_base_unstack_cup", # 1
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32, # pi05 is trained with 32-dim actions
+            action_horizon=16, 
+        ),
+        data=LeRobotRealDroidDataConfig(
+            repo_id="easyminnn/gripper_unstack_cup_final",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                #action_sequence_keys=("actions",), # or "action" # : **DEBUG** needed
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
+
+    TrainConfig(
+        name="naive_pi0_base", # 1-1
+        model=pi0_config.Pi0Config(
+            pi05=False,
+            action_dim=32, # pi05 is trained with 32-dim actions
+            action_horizon=16, 
+        ),
+        data=LeRobotRealDroidDataConfig(
+            repo_id="easyminnn/pi05_4tasks_final",
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+    ),
+
     TrainConfig(
         name="decoupled_stream_gripper_tactile", # 8
         model=pi0_config.Pi0Config(

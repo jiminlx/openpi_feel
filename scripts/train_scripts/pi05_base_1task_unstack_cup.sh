@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=pi05_base          
+#SBATCH --job-name=pi05_base_1task_unstack_cup          
 #SBATCH --partition=sjw_alinlab
 #SBATCH --nodes=1                     
-#SBATCH --gpus=1           
+#SBATCH --gpus=2           
 #SBATCH --output=slurm_train_logs/%x_%j.out       # 표준 출력 로그 저장 위치 (%x: job name, %j: job id)
 #SBATCH --error=slurm_train_logs/%x_%j.err        # 에러 로그 저장 위치
 
@@ -18,8 +18,8 @@ NUM_WORKERS=12
 mkdir -p slurm_train_logs
 
 # uv run 명령어로 스크립트 실행
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train_pytorch.py naive_base \
-    --exp_name pi05_base \
+uv run scripts/train_pytorch.py naive_base_unstack_cup \
+    --exp_name pi05_base_1task_unstack_cup \
     --batch-size $BATCH_SIZE \
     --num_workers $NUM_WORKERS \
     --save_interval $SAVE_INTERVAL \

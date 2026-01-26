@@ -362,7 +362,7 @@ def train_loop(config: _config.TrainConfig):
     loader, data_config = build_datasets(config)
 
     # Log sample images to wandb on first batch
-    if is_main and config.wandb_enabled and not resuming and False :
+    if is_main and config.wandb_enabled and not resuming:
         # Create a separate data loader for sample batch to avoid consuming the main loader
         sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False)
         sample_batch = next(iter(sample_data_loader))
@@ -418,7 +418,7 @@ def train_loop(config: _config.TrainConfig):
         # Update dtype to match pytorch_training_precision
         object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
-    if config.name == "naive_base":
+    if config.name == "naive_base" or config.name == "naive_base_unstack_cup" or config.name == "naive_pi0_base":
         print("\033[94mUploaded Naive Base Model\033[0m")
         model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
     elif config.name == "decoupled_stream_gripper_tactile":
@@ -591,6 +591,7 @@ def train_loop(config: _config.TrainConfig):
 
             observation = jax.tree.map(lambda x: x.to(device), observation)  # noqa: PLW2901
             actions = actions.to(device).to(torch.float32)  # noqa: PLW2901
+
             
             # Update LR
             for pg in optim.param_groups:
