@@ -397,7 +397,14 @@ def train_loop(config: _config.TrainConfig):
         logging.info("Cleared sample batch and data loader from memory")
 
     # Build model
-    if not isinstance(config.model, openpi.models.pi0_config.Pi0Config):
+    # Import Pi0ForceVLAConfig for isinstance check
+    import openpi.models.pi0_forcevla as pi0_forcevla
+
+    if isinstance(config.model, (openpi.models.pi0_config.Pi0Config, pi0_forcevla.Pi0ForceVLAConfig)):
+        model_cfg = config.model
+        # Update dtype to match pytorch_training_precision
+        object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
+    else:
         # Convert dataclass to Pi0Config if needed
         model_cfg = openpi.models.pi0_config.Pi0Config(
             dtype=config.pytorch_training_precision,
@@ -414,10 +421,6 @@ def train_loop(config: _config.TrainConfig):
             loss_tactile_weight=getattr(config.tactile_loss_weight, "loss_tactile_weight", 0.5),
             loss_torque_weight=getattr(config.model, "loss_torque_weight", 0.5),
         )
-    else:
-        model_cfg = config.model
-        # Update dtype to match pytorch_training_precision
-        object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
     if config.name == "naive_base":
         print("\033[94mUploaded Naive Base Model\033[0m")

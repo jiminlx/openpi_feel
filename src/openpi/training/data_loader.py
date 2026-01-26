@@ -567,9 +567,13 @@ class DataLoaderImpl(DataLoader):
 
     def __iter__(self):
         for batch in self._data_loader:
+            # Include tactile_history in batch dict for Observation.from_dict
+            # This allows ForceVLA model to access tactile via observation.tactile
             obs = _model.Observation.from_dict(batch)
             actions = batch["actions"]
             tactile_history = batch.get("tactile_history", None)
+            if tactile_history is not None:
+                batch["tactile"] = tactile_history
             tactile_future = batch.get("tactile_future", None)
             torque_history = batch.get("torque_history", None)
             torque_future = batch.get("torque_future", None)

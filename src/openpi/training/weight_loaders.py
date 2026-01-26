@@ -73,6 +73,31 @@ class PaliGemmaWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*")
 
 
+@dataclasses.dataclass(frozen=True)
+class Pi0ForceVLAWeightLoader(WeightLoader):
+    """Loads weights from a Pi0/Pi0.5 checkpoint for ForceVLA model.
+
+    This loader handles the case where the ForceVLA model has additional layers
+    (limoe, tactile_in_proj) that are not present in the base Pi0/Pi0.5 checkpoint.
+    These new layers will be initialized randomly while the rest of the weights
+    are loaded from the checkpoint.
+
+    Compatible with:
+      trained checkpoints:
+        example: "./checkpoints/<config>/<exp>/<step>/params"
+      released checkpoints:
+        example: "gs://openpi-assets/checkpoints/<model>/params"
+    """
+
+    params_path: str
+
+    def load(self, params: at.Params) -> at.Params:
+        # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        # Add all missing weights: LoRA, LIMoE, and tactile-related layers
+        return _merge_params(loaded_params, params, missing_regex=".*lora.*|.*limoe.*|.*tactile.*")
+
+
 def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex: str) -> at.Params:
     """Merges the loaded parameters with the reference parameters.
 

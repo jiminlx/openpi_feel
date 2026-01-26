@@ -2,8 +2,12 @@
 checkpoints/
 checkpoints_icml/
 slurm_train_logs/
+slurm_out/
 data/
 wandb/
+/cache
+/ckpt
+/output
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

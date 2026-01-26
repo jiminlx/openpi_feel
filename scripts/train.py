@@ -138,7 +138,7 @@ def train_step(
     config: _config.TrainConfig,
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
-    batch: tuple[_model.Observation, _model.Actions],
+    batch: tuple,  # (observation, actions, tactile_history, tactile_future, torque_history, torque_future)
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
@@ -151,7 +151,14 @@ def train_step(
         return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
-    observation, actions = batch
+
+    # Unpack batch - data loader returns 6 values
+    observation, actions, tactile_history, tactile_future, torque_history, torque_future = batch
+
+    # For ForceVLA: inject tactile_history into observation
+    # The model's compute_loss will access observation.tactile
+    if tactile_history is not None:
+        observation = dataclasses.replace(observation, tactile=tactile_history)
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)

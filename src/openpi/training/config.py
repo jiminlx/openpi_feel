@@ -16,6 +16,7 @@ import tyro
 import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
+import openpi.models.pi0_forcevla as pi0_forcevla
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
@@ -137,7 +138,7 @@ class ModelTransformFactory(GroupFactory):
                     ],
                 )
             case _model.ModelType.PI05:
-                assert isinstance(model_config, pi0_config.Pi0Config)
+                # assert isinstance(model_config, pi0_config.Pi0Config)
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
@@ -1333,14 +1334,16 @@ _CONFIGS = [
     ),
 
     # ForceVLA: LIMoE-based tactile fusion (ported from ForceVLA codebase)
-    # Uses single tactile timestep (last from history) for LIMoE fusion
+    # Uses tactile history (16 timesteps x 30 dims) for LIMoE fusion
     # No tactile prediction loss - only action prediction
     TrainConfig(
-        name="forcevla_gripper_tactile",
-        model=pi0_config.Pi0Config(
+        name="forcevla_pi05_gripper_tactile",
+        model=pi0_forcevla.Pi0ForceVLAConfig(
             pi05=True,
             action_dim=32,
             action_horizon=16,
+            tactile_input_dim=30,
+            tactile_history_len=16,
         ),
         data=LeRobotRealDroidDataConfig(
             repo_id="easyminnn/pi05_4tasks_final",
@@ -1348,10 +1351,28 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.Pi0ForceVLAWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
     ),
 
+    TrainConfig(
+        name="forcevla_pi0_gripper_tactile",
+        model=pi0_forcevla.Pi0ForceVLAConfig(
+            pi05=False,
+            action_dim=32,
+            action_horizon=16,
+            tactile_input_dim=30,
+            tactile_history_len=16,
+        ),
+        data=LeRobotRealDroidDataConfig(
+            repo_id="easyminnn/pi05_4tasks_final",
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.Pi0ForceVLAWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
