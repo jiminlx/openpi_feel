@@ -13,6 +13,8 @@ import openpi.shared.nnx_utils as nnx_utils
 
 if TYPE_CHECKING:
     from openpi.models.pi0 import Pi0
+    from openpi.models.pi0_gripper_tactile import Pi0JaxWithGripperTactile
+    from openpi.models.pi0_franka_torque_gripper_tactile import Pi0JaxWithGripperTactileTorque
 
 
 @dataclasses.dataclass(frozen=True)
@@ -27,7 +29,9 @@ class Pi0Config(_model.BaseModelConfig):
     action_dim: int = 32
     action_horizon: int = 50
     max_token_len: int = None  # type: ignore
-
+    
+    history_len : int = 16
+    
     tactile_input_dim: int = 30
     loss_tactile_weight: float = 0.05
     torque_input_dim: int = 7
@@ -38,6 +42,8 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+
+    train_config_name: str = None
 
     def __post_init__(self):
         if self.max_token_len is None:
@@ -54,9 +60,28 @@ class Pi0Config(_model.BaseModelConfig):
 
     @override
     def create(self, rng: at.KeyArrayLike) -> "Pi0":
-        from openpi.models.pi0 import Pi0
 
-        return Pi0(self, rngs=nnx.Rngs(rng))
+        if self.train_config_name == "pi0_decoupled_stream_gripper_tactile":
+            from openpi.models.pi0_gripper_tactile import Pi0JaxWithGripperTactile
+            return Pi0JaxWithGripperTactile(self, rngs=nnx.Rngs(rng))
+        
+        elif self.train_config_name == "pi0_decoupled_stream_gripper_tactile_franka_torque":
+            from openpi.models.pi0_gripper_tactile_franka_torque import Pi0JaxWithGripperTactileTorque
+            return Pi0JaxWithGripperTactileTorque(self, rngs=nnx.Rngs(rng))
+
+        elif self.train_config_name == "pi0_decoupled_stream_franka_torque":
+            from openpi.models.pi0_franka_torque import Pi0JaxWithFrankaTorque
+            return Pi0JaxWithFrankaTorque(self, rngs=nnx.Rngs(rng))
+
+        elif self.train_config_name == "pi0_tavla":
+            from openpi.models.pi0_tavla import Pi0JaxTavla
+            return Pi0JaxTavla(self, rngs=nnx.Rngs(rng))
+
+        elif self.train_config_name == "pi0_base":
+            from openpi.models.pi0 import Pi0
+            return Pi0(self, rngs=nnx.Rngs(rng))
+        else:
+            raise ValueError(f"Invalid train config name: {self.train_config_name}")
 
     @override
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:

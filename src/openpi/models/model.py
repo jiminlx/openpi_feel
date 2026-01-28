@@ -95,6 +95,11 @@ class Observation(Generic[ArrayT]):
     # Low-dimensional robot state.
     state: at.Float[ArrayT, "*b s"]
 
+    # Tactile history.
+    tactile_history: at.Float[ArrayT, "*b th d"] | None = None
+    # Torque history.
+    torque_history: at.Float[ArrayT, "*b th td"] | None = None
+
     # Tokenized prompt.
     tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
     # Tokenized prompt mask.
@@ -127,6 +132,8 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            tactile_history=data.get("tactile_history"),
+            torque_history=data.get("torque_history"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -143,7 +150,6 @@ Actions = at.Float[ArrayT, "*b ah ad"]
 
 TactileHistory = at.Float[ArrayT, "*b th d"] # Context
 TactileFuture = at.Float[ArrayT, "*b tf d"]  # Target
-
 
 
 def preprocess_observation(
@@ -202,6 +208,7 @@ def preprocess_observation(
         else:
             out_masks[key] = jnp.asarray(observation.image_masks[key])
 
+
     return Observation(
         images=out_images,
         image_masks=out_masks,
@@ -210,6 +217,8 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        tactile_history=observation.tactile_history,
+        torque_history=observation.torque_history,
     )
 
 
@@ -287,8 +296,6 @@ class BaseModel(nnx.Module, abc.ABC):
         rng: at.KeyArrayLike,
         observation: Observation,
         actions: Actions,
-        tactile_history: Optional[TactileHistory] = None,
-        tactile_future: Optional[TactileFuture] = None,
         *,
         train: bool = False,
     ) -> at.Float[at.Array, "*b ah"]: ...
@@ -298,7 +305,6 @@ class BaseModel(nnx.Module, abc.ABC):
         self, 
         rng: at.KeyArrayLike, 
         observation: Observation,
-        tactile_history: Optional[TactileHistory] = None,
         **kwargs
     ) -> Actions: ...
 

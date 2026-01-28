@@ -815,6 +815,8 @@ class TrainConfig:
 
     torque_loss_weight: float = 1.0
 
+    checkpoint_path: str | None = None
+
     freeze_action_stream: bool = False
 
     @property
@@ -1263,43 +1265,6 @@ _CONFIGS = [
 # Implementation Needed : 1, 2, 5, 6, 7, 8(o), 9, 10, 11(o), 12
 
     TrainConfig(
-        name="naive_base", # 1
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=32, # pi05 is trained with 32-dim actions
-            action_horizon=16, 
-        ),
-        data=LeRobotRealDroidDataConfig(
-            repo_id="easyminnn/pi05_4tasks_final",
-            base_config=DataConfig(
-                prompt_from_task=True,
-                #action_sequence_keys=("actions",), # or "action" # : **DEBUG** needed
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-    ),
-
-    # temp
-    TrainConfig(
-        name="naive_base_unstack_cup", # 1
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=32, # pi05 is trained with 32-dim actions
-            action_horizon=16, 
-        ),
-        data=LeRobotRealDroidDataConfig(
-            repo_id="easyminnn/gripper_unstack_cup_final",
-            base_config=DataConfig(
-                prompt_from_task=True,
-                #action_sequence_keys=("actions",), # or "action" # : **DEBUG** needed
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-    ),
-
-    TrainConfig(
         name="naive_pi0_base", # 1-1
         model=pi0_config.Pi0Config(
             pi05=False,
@@ -1316,29 +1281,49 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
 
-    TrainConfig(
-        name="decoupled_stream_gripper_tactile", # 8
+     TrainConfig(
+        name="pi0_decoupled_stream_gripper_tactile", # 8
         model=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=32, # pi05 is trained with 32-dim actions
+            pi05=False, 
+            action_dim=32, # pi0 is trained with 32-dim actions
             action_horizon=16, 
+            train_config_name="pi0_decoupled_stream_gripper_tactile",
             ),
-        data=LeRobotRealDroidDataConfig(
+        data=LeRobotRealDroidDataConfig( # this is equals to LerobotRealDroidTactileDataConfig
             repo_id="easyminnn/pi05_4tasks_final",
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
     ),
 
     TrainConfig(
-        name="decoupled_stream_franka_torque", # 7
+        name="pi0_decoupled_stream_gripper_tactile_franka_torque", # 11
         model=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=32, # pi05 is trained with 32-dim actions
+            pi05=False, 
+            action_dim=32, # pi0 is trained with 32-dim actions
             action_horizon=16, 
+            train_config_name="pi0_decoupled_stream_gripper_tactile_franka_torque",
+        ),
+        data=LeRobotRealDroidTactileTorqueDataConfig(
+            repo_id="easyminnn/pi05_4tasks_final",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                ),
+            ),
+            weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+            num_train_steps=30_000,
+        ),
+
+    TrainConfig(
+        name="pi0_decoupled_stream_franka_torque",
+        model=pi0_config.Pi0Config(
+            pi05=False, 
+            action_dim=32, # pi0 is trained with 32-dim actions
+            action_horizon=16, 
+            train_config_name="pi0_decoupled_stream_franka_torque",
         ),
         data=LeRobotRealDroidTorqueDataConfig(
             repo_id="easyminnn/pi05_4tasks_final",
@@ -1346,27 +1331,26 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
     ),
-
-    TrainConfig(
-        name="decoupled_stream_gripper_tactile_franka_torque", # 11
+     TrainConfig(
+        name="pi0_tavla",
         model=pi0_config.Pi0Config(
-            pi05=True,
-            action_dim=32, # pi05 is trained with 32-dim actions
+            pi05=False, 
+            action_dim=32, # pi0 is trained with 32-dim actions
             action_horizon=16, 
-            ),
-        data=LeRobotRealDroidTactileTorqueDataConfig(
+            train_config_name="pi0_tavla",
+        ),
+        data=LeRobotRealDroidTorqueDataConfig(
             repo_id="easyminnn/pi05_4tasks_final",
             base_config=DataConfig(
                 prompt_from_task=True,
-                #action_sequence_keys=("actions",), # or "action" # : **DEBUG** needed
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
-    ),
+    )
 
 ]
 

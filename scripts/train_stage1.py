@@ -2,6 +2,7 @@ import dataclasses
 import functools
 import logging
 import platform
+import os
 from typing import Any
 
 import etils.epath as epath
@@ -26,6 +27,13 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
+import sys
+
+import orbax.checkpoint as ocp
+
+# [DIAGRAM: Training Flow]
+# Stage 1: Init Params -> Mask Action Stream (Freeze) -> Train Tactile Stream -> Save Checkpoint
+# Stage 2: Load Checkpoint (Params Only) -> Reset Optimizer -> Unfreeze All -> Joint Train
 
 
 def init_logging():
@@ -44,7 +52,13 @@ def init_logging():
 
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    logger.handlers[0].setFormatter(formatter)
+    if logger.handlers:
+        logger.handlers[0].setFormatter(formatter)
+    else:
+        # Fallback if no handler exists
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
 
 
 def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
@@ -88,34 +102,86 @@ def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shap
     )
 
 
+
+def create_freeze_filter(config: _config.TrainConfig):
+    """
+    Creates a filter to freeze the Action Stream components.
+    """
+    # Config에 freeze_action_stream 속성이 없으면 False 처리
+    if not getattr(config, "freeze_action_stream", False):
+        return config.trainable_filter
+
+    logging.info("\033[93m[Freeze Config] Freezing Action Stream active! Gradients will be blocked for action components.\033[0m")
+
+    # Regex to match Action Stream components (Pi0 Architecture specific)
+    # action_in_proj: Action 입력 projection
+    # action_out_proj: Action 출력 projection
+    # time_mlp / action_time_mlp: Action stream의 time conditioning
+    # layers/.*_2: Gemma의 Action Expert (Index 2)
+    action_stream_regex = r".*(action_in_proj|action_out_proj|time_mlp|state_proj|action_time_mlp|layers/.*_2|final_norm_2).*"
+
+    def filter_fn(path, param):
+        # 1. 먼저 기본 Trainable 필터 통과 여부 확인
+        is_trainable_type = config.trainable_filter(path, param)
+        if not is_trainable_type:
+            return False
+        
+        # 2. Action Stream 패턴과 매칭되면 False (Freeze)
+        if nnx_utils.PathRegex(action_stream_regex)(path, param):
+            return False 
+        
+        return True # Tactile Stream 및 Shared Component는 학습
+
+    return filter_fn
+
 @at.typecheck
 def init_train_state(
-    config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
+    config: _config.TrainConfig, 
+    init_rng: at.KeyArrayLike, 
+    mesh: jax.sharding.Mesh, 
+    *, 
+    resume: bool,
 ) -> tuple[training_utils.TrainState, Any]:
+    
+    active_trainable_filter = create_freeze_filter(config)
     tx = _optimizer.create_optimizer(config.optimizer, config.lr_schedule, weight_decay_mask=None)
 
     def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
         rng, model_rng = jax.random.split(rng)
-        # initialize the model (and its parameters).
         model = config.model.create(model_rng)
 
-        # Merge the partial params into the model.
+        # Stage 2: Load checkpoint params
         if partial_params is not None:
+            logging.info("Loading params from Stage 1 checkpoint...")
             graphdef, state = nnx.split(model)
-            # This will produce an error if the partial params are not a subset of the state.
-            state.replace_by_pure_dict(partial_params)
+            
+            # Convert partial_params back to NNX State if it's a pure dict
+            if isinstance(partial_params, dict):
+                state = state.replace_by_pure_dict(partial_params)
+            else:
+                state = partial_params
+                
             model = nnx.merge(graphdef, state)
+            logging.info("✓ Successfully loaded Stage 1 parameters")
 
         params = nnx.state(model)
-        # Convert frozen params to bfloat16.
-        params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
+        
+        # Apply dtype conversion to frozen params
+        params = nnx_utils.state_map(
+            params, 
+            config.freeze_filter, 
+            lambda p: p.replace(p.value.astype(jnp.bfloat16))
+        )
+
+        # Initialize optimizer with current trainable filter
+        opt_state = tx.init(params.filter(active_trainable_filter))
 
         return training_utils.TrainState(
-            step=0,
+            step=0,  # Always start from 0 for Stage 2
             params=params,
             model_def=nnx.graphdef(model),
             tx=tx,
-            opt_state=tx.init(params.filter(config.trainable_filter)),
+            opt_state=opt_state,
             ema_decay=config.ema_decay,
             ema_params=None if config.ema_decay is None else params,
         )
@@ -126,71 +192,143 @@ def init_train_state(
     if resume:
         return train_state_shape, state_sharding
 
-    partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
+    # --- Weight Loading Logic ---
+    partial_params = None
+    
+    # Case A: Load from Stage 1 checkpoint (Stage 2)
+    if config.checkpoint_path:
+        logging.info(f"[Stage 2] Loading from: {config.checkpoint_path}")
+        
+        ckpt_path_obj = epath.Path(config.checkpoint_path)
+        
+        if not ckpt_path_obj.exists():
+            raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path_obj}")
+        
+        try:
+            # Create checkpointer
+            checkpointer = ocp.PyTreeCheckpointer()
+            
+            # Method 1: Try loading full TrainState then extract params
+            logging.info("Attempting to load full TrainState...")
+            try:
+                full_state = checkpointer.restore(
+                    ckpt_path_obj,
+                    item=train_state_shape
+                )
+                
+                # Extract only params
+                partial_params = full_state.params
+                if hasattr(partial_params, 'to_pure_dict'):
+                    partial_params = partial_params.to_pure_dict()
+                    
+                logging.info("✓ Loaded params from full TrainState")
+                
+            except Exception as e1:
+                logging.warning(f"Could not load full state: {e1}")
+                
+                # Method 2: Try loading params subdirectory
+                params_path = ckpt_path_obj / 'params'
+                if params_path.exists():
+                    logging.info(f"Trying params subdirectory: {params_path}")
+                    
+                    # Get target structure
+                    params_shape = train_state_shape.params
+                    if hasattr(params_shape, 'to_pure_dict'):
+                        params_shape = params_shape.to_pure_dict()
+                    
+                    partial_params = checkpointer.restore(
+                        params_path,
+                        item=params_shape
+                    )
+                    logging.info("✓ Loaded params from subdirectory")
+                else:
+                    raise ValueError(f"Could not load checkpoint from {ckpt_path_obj}")
+                    
+        except Exception as e:
+            logging.error(f"Failed to load checkpoint: {e}")
+            logging.error(f"Checkpoint structure at {ckpt_path_obj}:")
+            for item in ckpt_path_obj.iterdir():
+                logging.error(f"  - {item.name}")
+            raise
+    
+    # Case B: Generic weight loading
+    elif config.weight_loader:
+        logging.info("Loading from weight_loader...")
+        params_shape = train_state_shape.params
+        if hasattr(params_shape, 'to_pure_dict'):
+            params_shape = params_shape.to_pure_dict()
+        partial_params = _load_weights_and_validate(config.weight_loader, params_shape)
+
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
-    # Initialize the train state and mix in the partial params.
     train_state = jax.jit(
         init,
-        donate_argnums=(1,),  # donate the partial params buffer.
+        donate_argnums=(1,),
         in_shardings=replicated_sharding,
         out_shardings=state_sharding,
     )(init_rng, partial_params)
 
     return train_state, state_sharding
 
-
 @at.typecheck
 def train_step(
     config: _config.TrainConfig,
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
-    batch: tuple | Any, 
+    batch: tuple,
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
+    
+    # Determine which filter to use for gradients
+    active_trainable_filter = create_freeze_filter(config)
 
     @at.typecheck
     def loss_fn(
-        model: _model.BaseModel,
+        model: _model.BaseModel, 
         rng: at.KeyArrayLike, 
-        observation: _model.Observation,
+        observation: _model.Observation, 
         actions: _model.Actions,
         tactile_future: at.Float[at.Array, "..."] | None = None,
         torque_future: at.Float[at.Array, "..."] | None = None
     ):
+        # Prepare kwargs for compute_loss based on what's available
         extra_args = {}
         if tactile_future is not None:
             extra_args["tactile_future"] = tactile_future
         if torque_future is not None:
             extra_args["torque_future"] = torque_future
+        
+        #import pdb; pdb.set_trace()
         chunked_loss = model.compute_loss(rng, observation, actions, train=True, **extra_args)
         return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions, tactile_history, tactile_future, torque_history, torque_future = batch
 
+    # Need to inject tactile_history into observation if model expects it there
     if tactile_history is not None:
         observation = dataclasses.replace(observation, tactile_history=tactile_history)
     if torque_history is not None:
         observation = dataclasses.replace(observation, torque_history=torque_history)
 
-    # Filter out frozen params.
-    diff_state = nnx.DiffState(0, config.trainable_filter)
+    # Filter out frozen params from gradient calculation
+    diff_state = nnx.DiffState(0, active_trainable_filter)
 
     extra_args = {}
     if tactile_future is not None:
         extra_args["tactile_future"] = tactile_future
     if torque_future is not None:
         extra_args["torque_future"] = torque_future
+    
+    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(
+        model, train_rng, observation, actions, **extra_args
+    )
 
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions, **extra_args)
-
-    params = state.params.filter(config.trainable_filter)
+    params = state.params.filter(active_trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
     new_params = optax.apply_updates(params, updates)
 
-    # Update the model in place and return the new full state.
     nnx.update(model, new_params)
     new_params = nnx.state(model)
 
@@ -203,7 +341,6 @@ def train_step(
             ),
         )
 
-    # Filter out params that aren't kernels.
     kernel_params = nnx.state(
         model,
         nnx.All(
@@ -224,10 +361,29 @@ def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
 
+    # --- CLI Args Handling (Simulation) ---
+    # Since config is frozen/parsed before, we check sys.argv or environment for custom flags
+    # In a real setup, these should be in _config.py definition.
+    # We monkey-patch/inject for this script.
+    
+
+    if "--freeze_action_stream" in sys.argv:
+        logging.info("\033[93m[CLI] Detected --freeze_action_stream flag. Injecting into config.\033[0m")
+        # config가 Frozen Dataclass일 경우를 대비해 우회하거나 replace 사용
+        try:
+            config = dataclasses.replace(config, freeze_action_stream=True)
+        except TypeError: 
+            # dataclass 정의에 필드가 없는 경우 runtime monkey patch
+            # 주의: dataclass가 frozen=True이면 setattr 실패할 수 있음. 이 경우 _config.py 수정 필요.
+            # 여기서는 임시방편으로 setattr 시도
+            try:
+                object.__setattr__(config, "freeze_action_stream", True)
+            except Exception as e:
+                logging.error(f"Failed to set freeze_action_stream on config: {e}. Please add 'freeze_action_stream: bool = False' to your TrainConfig.")
+                # Fallback: create_freeze_filter에서 sys.argv를 직접 체크하는 것이 안전할 수 있으나, 여기선 주입되었다고 가정.
+
     if config.batch_size % jax.device_count() != 0:
-        raise ValueError(
-            f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."
-        )
+        raise ValueError(f"Batch size {config.batch_size} must be divisible by devices {jax.device_count()}.")
 
     jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
 
@@ -246,27 +402,16 @@ def main(config: _config.TrainConfig):
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
-    data_loader = _data_loader.create_data_loader(
-        config,
-        sharding=data_sharding,
-        shuffle=True,
-    )
+    data_loader = _data_loader.create_data_loader(config, sharding=data_sharding, shuffle=True)
     data_iter = iter(data_loader)
-    batch = next(data_iter)
-    logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
-
-    # Log images from first batch to sanity check.
-    images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
-    ]
-    wandb.log({"camera_views": images_to_log}, step=0)
-
+    
+    # Init Train State (Params Load + Opt Reset logic inside)
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
-    logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
 
+    print("RESUMING: ", resuming)
     if resuming:
+        logging.info("Resuming full training state (optimizer + step)...")
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
     ptrain_step = jax.jit(
@@ -277,33 +422,36 @@ def main(config: _config.TrainConfig):
     )
 
     start_step = int(train_state.step)
+    logging.info(f"Starting training loop from step {start_step} to {config.num_train_steps}")
+    
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
         initial=start_step,
         total=config.num_train_steps,
         dynamic_ncols=True,
     )
-
+ 
     infos = []
     for step in pbar:
+        try:
+            batch = next(data_iter)
+        except StopIteration:
+            data_iter = iter(data_loader)
+            batch = next(data_iter)
+
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
         infos.append(info)
+        
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
-            pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
-        batch = next(data_iter)
-
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
 
-    logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
-
 
 if __name__ == "__main__":
     main(_config.cli())

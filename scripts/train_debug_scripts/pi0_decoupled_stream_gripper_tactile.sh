@@ -1,33 +1,31 @@
 #!/bin/bash
-#SBATCH --job-name=pi05_tactile_2stage
+#SBATCH --job-name=pi0_jax_decoupled_tactile
 #SBATCH --partition=sjw_alinlab_h100
 #SBATCH --nodelist=worker-node1002
-#SBATCH --nodes=1
-#SBATCH --gpus=2
+#SBATCH --nodes=1                     
+#SBATCH --gpus=2           
 #SBATCH --output=slurm_train_logs/%x_%j.out
 #SBATCH --error=slurm_train_logs/%x_%j.err
 
 # ---------------------------------------------------------------------------
-# [공통 설정]
+# [Common Settings]
 # ---------------------------------------------------------------------------
-CONFIG_NAME="decoupled_stream_gripper_tactile"
-CHECKPOINT_DIR="/sjw_alinlab2/home/jimin/openpi_feel/checkpoints_icml"
+CONFIG_NAME="pi0_decoupled_stream_gripper_tactile"
+CHECKPOINT_DIR="/sjw_alinlab2/home/jimin/openpi_feel/checkpoints_icml_jax"
 NUM_WORKERS=8
-BATCH_SIZE=16
+BATCH_SIZE=8
 
-# 로그 폴더 생성
+# Create log dir
 mkdir -p slurm_train_logs
 
-# 포트 충돌 방지를 위한 랜덤 포트 설정 (DDP 사용 시 중요)
-export MASTER_PORT=$(shuf -i 20000-60000 -n 1)
-echo "Using Master Port: $MASTER_PORT"
+# JAX Memory Allocation (Prevent OOM during compilation)
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 
 # ---------------------------------------------------------------------------
 # [Stage 1] Tactile Stream Pre-training (Action Freeze)
 # ---------------------------------------------------------------------------
-STAGE1_EXP_NAME="decoupled_stream_gripper_tactile_stage1"
-STAGE1_STEPS=5000
-# Stage 1에서는 Tactile Loss가 지배적이도록 설정 (어차피 Action은 Freeze라 0임)
+STAGE1_EXP_NAME="pi0_decoupled_stream_gripper_tactile_stage1"
+STAGE1_STEPS=300
 STAGE1_TACTILE_WEIGHT=1.0
 
 echo "=================================================================="
@@ -35,17 +33,19 @@ echo "Starting Stage 1: Tactile Pre-training (0 ~ $STAGE1_STEPS steps)"
 echo "Action Stream will be FROZEN."
 echo "=================================================================="
 
-uv run scripts/train_pytorch.py $CONFIG_NAME \
+# Note: Added --freeze_action_stream flag which is handled in train.py
+uv run scripts/train.py $CONFIG_NAME \
     --exp_name $STAGE1_EXP_NAME \
-    --batch_size $BATCH_SIZE \
+    --batch-size $BATCH_SIZE \
     --num_workers $NUM_WORKERS \
     --save_interval 5000 \
     --num_train_steps $STAGE1_STEPS \
-    --checkpoint_base_dir $CHECKPOINT_DIR \
+    --checkpoint-base-dir $CHECKPOINT_DIR \
     --model.loss_tactile_weight $STAGE1_TACTILE_WEIGHT \
-    --freeze_action_stream
+    --freeze_action_stream \
+    --overwrite
 
-# Stage 1 성공 여부 확인
+# Check Success
 if [ $? -ne 0 ]; then
     echo "Stage 1 failed! Exiting..."
     exit 1
@@ -54,14 +54,17 @@ fi
 # ---------------------------------------------------------------------------
 # [Stage 2] Joint Fine-tuning (Unfreeze All)
 # ---------------------------------------------------------------------------
-STAGE2_EXP_NAME="decoupled_stream_gripper_tactile_stage2"
-TOTAL_STEPS=25000  # 10k(Stage1) + 20k(Add) = 30k Total
-STAGE2_TACTILE_WEIGHT=0.05 # Joint 학습 시 가중치 조절
+STAGE2_EXP_NAME="pi0_decoupled_stream_gripper_tactile_stage2"
+TOTAL_STEPS=30000  # 5k(Stage1) + 25k(Add) = 30k Total
+STAGE2_TACTILE_WEIGHT=0.05 
 
-# Stage 1에서 저장된 마지막 체크포인트 경로 (Stage1 Steps -1 step)
-INT_STAGE1_CKPT_PATH=$((STAGE1_STEPS-1))
-STAGE1_CKPT_PATH="$CHECKPOINT_DIR/$CONFIG_NAME/$STAGE1_EXP_NAME/$INT_STAGE1_CKPT_PATH"
-
+# Path to the last checkpoint of Stage 1 (Step 4999 or 5000 depending on save logic)
+# Note: Checkpoints in Orbax are usually named by step number.
+# If save_interval is 5000, and we ran 5000 steps (0-4999), the save might be at 4999 or 5000.
+# Assuming standard logic saves at num_train_steps - 1 or num_train_steps.
+# Let's target the exact folder.
+INT_STAGE1_CKPT_STEP=$((STAGE1_STEPS - 1))
+STAGE1_CKPT_PATH="$CHECKPOINT_DIR/$CONFIG_NAME/$STAGE1_EXP_NAME/$INT_STAGE1_CKPT_STEP"
 
 echo "=================================================================="
 echo "Starting Stage 2: Joint Training (0 ~ $TOTAL_STEPS steps)"
@@ -69,15 +72,17 @@ echo "Loading weights from: $STAGE1_CKPT_PATH"
 echo "Action Stream will be UNFROZEN (Optimizer Reset)."
 echo "=================================================================="
 
-# 주의: resume 플래그는 끄고, pytorch_weight_path를 사용해야 Optimizer가 리셋됨
-uv run scripts/train_pytorch.py $CONFIG_NAME \
+# Note: We do NOT use --resume. instead we use --checkpoint_path to just load params.
+# We do NOT pass --freeze_action_stream here.
+uv run scripts/train.py $CONFIG_NAME \
     --exp_name $STAGE2_EXP_NAME \
-    --batch_size $BATCH_SIZE \
+    --batch-size $BATCH_SIZE \
     --num_workers $NUM_WORKERS \
     --save_interval 5000 \
     --num_train_steps $TOTAL_STEPS \
     --checkpoint_base_dir $CHECKPOINT_DIR \
     --model.loss_tactile_weight $STAGE2_TACTILE_WEIGHT \
-    --pytorch_weight_path $STAGE1_CKPT_PATH
+    --checkpoint_path $STAGE1_CKPT_PATH \
+    --overwrite
 
-echo "All Stages Finished at $(date)"
+echo "Job finished at $(date)"
